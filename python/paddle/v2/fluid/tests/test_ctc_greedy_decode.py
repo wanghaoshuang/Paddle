@@ -31,7 +31,7 @@ class TestCTCGreedyDecodeOp(OpTest):
         softmax = np.apply_along_axis(stable_softmax, 1, input)
         output = CTCGreedyDecode(softmax, self.blank, self.merge_repeated)
 
-        self.inputs = {"Input": (input, self.input_lod), }
+        self.inputs = {"Input": (softmax, self.input_lod), }
         self.outputs = {"Output": output}
         self.attrs = {
             "blank": self.blank,
@@ -40,6 +40,16 @@ class TestCTCGreedyDecodeOp(OpTest):
 
     def test_check_output(self):
         self.check_output()
+
+
+class TestCTCGreedyDecodeOpCase1(TestCTCGreedyDecodeOp):
+    def config(self):
+        self.op_type = "ctc_greedy_decode"
+        self.batch_size = 4
+        self.num_classes = 1025
+        self.input_lod = [[0, 4, 5, 8, 11]]
+        self.blank = 0
+        self.merge_repeated = True
 
 
 if __name__ == "__main__":
