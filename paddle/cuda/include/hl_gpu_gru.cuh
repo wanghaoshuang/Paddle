@@ -19,6 +19,7 @@ limitations under the License. */
 #ifdef __NVCC__
 
 #include "paddle/utils/Logging.h"
+#include "paddle/cuda/include/hl_log.h"
 
 /*
  * threads(framePerBlock, batchPerBlock)
@@ -135,6 +136,17 @@ void hl_gpu_gru_forward(OpResetOutput opResetOutput,
                   frameSize, 2* frameSize, 3*frameSize);
   }
 
+  cout << "gateValue[:2] = prevOutValue * gateWeight " << endl;
+  int prevOutValueSize = batchSize * frameSize;
+  int gateWeightSize = frameSize * (2*frameSize);
+  int gateValueSize = batchSize * (2*frameSize);
+  cout << "prevOutValue: " << endl;
+  log_cuda_data<real>(value.prevOutValue, prevOutValueSize);
+  cout << "gateWeight: " << endl;
+  log_cuda_data<real>(value.gateWeight, gateWeightSize);
+  cout << "gateValue[:2]: " << endl;
+  log_cuda_data<real>(value.gateValue, gateValueSize);
+
   if (batchSize == 1) {
     KeGruForwardResetOutput<OpResetOutput, /* isBatch= */false>
       <<<grid, threads, 0, STREAM_DEFAULT>>>(opResetOutput,
@@ -147,6 +159,18 @@ void hl_gpu_gru_forward(OpResetOutput opResetOutput,
         frameSize, batchSize, active_gate);
   }
 
+
+  cout << "gateValue[0] = act(gateValue[0]); gateValue[1] = act(gateValue[1]);" << endl;
+  cout << "resetOutputValue =  prevOutValue * gateValue[0]" << endl;
+  int resetOutputValueSize = batchSize * frameSize;
+  cout << "gateValue[0]:" << endl;
+  log_cuda_data<real>(value.gateValue, batchSize * frameSize);
+  cout << "gateValue[1]:" << endl;
+  log_cuda_data<real>(value.gateValue + frameSize, batchSize * frameSize);
+  cout << "resetOutputValue:" << endl;
+  log_cuda_data<real>(value.resetOutputValue, resetOutputValueSize);
+
+
   if (value.prevOutValue) {
     hl_matrix_mul(value.resetOutputValue, HPPL_OP_N,
                   value.stateWeight, HPPL_OP_N,
@@ -155,6 +179,15 @@ void hl_gpu_gru_forward(OpResetOutput opResetOutput,
                   /*alpha = */ 1, /*beta = */ 1,
                   frameSize, frameSize, 3*frameSize);
   }
+
+  cout << "gateValue[2] +=  resetOutputValue * stateWeight" << endl;
+  int statWeightSize = frameSize * frameSize;
+  int gateValue2Size = batchSize * frameSize;
+  cout << "stateWeight:" << endl;
+  log_cuda_data<real>(value.stateWeight, statWeightSize);
+  cout << "gateValue[2]:" << endl;
+  log_cuda_data<real>(value.gateValue + 2*frameSize, gateValue2Size);
+
 
   if (batchSize == 1) {
     KeGruForwardFinalOutput<OpFinalOutput, /* isBatch= */false>
@@ -167,6 +200,12 @@ void hl_gpu_gru_forward(OpResetOutput opResetOutput,
         value.gateValue, value.prevOutValue, value.outputValue,
         frameSize, batchSize, active_node);
   }
+  cout << "gateValue[2] = tanh(gateValue[2])"<< endl;
+  cout << "outputValue = (1-gateValue[1])*prevOutValue + gateValue[1] * gateValue[2]" << endl;
+  cout << "gateValue[2]:" << endl;
+  log_cuda_data<real>(value.gateValue + 2*frameSize, gateValue2Size);
+  cout << "outputValue: " << endl;
+  log_cuda_data<real>(value.outputValue, batchSize * frameSize);
 
   CHECK_SYNC("hl_gpu_gru_forward failed");
 }

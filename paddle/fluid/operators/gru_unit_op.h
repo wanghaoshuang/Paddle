@@ -19,6 +19,7 @@ limitations under the License. */
 
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/op_registry.h"
+#include "paddle/cuda/include/hl_log.h"
 
 namespace paddle {
 namespace operators {
@@ -86,36 +87,77 @@ class GRUUnitKernel : public framework::OpKernel<T> {
     const T* hidden_prev_data = hidden_prev->data<T>();
     const T* weight_data = weight->data<T>();
     T* gate_data = gate->data<T>();
+
+    LOG(ERROR) << "hidden_prev_data:";
+    LOG(ERROR) << "hidden_prev_data:";
+    log_cuda_data<T>(hidden_prev_data, batch_size * frame_size);
+    LOG(ERROR) << "weight[:2]";
+    log_cuda_data<T>(weight_data, frame_size * 2 * frame_size);
+    LOG(ERROR) << "gate_data[:2]:";
+    log_cuda_data<T>(gate_data, batch_size * 2 * frame_size);
+
     T* reset_hidden_prev_data = reset_hidden_prev->data<T>();
     math::gemm<DeviceContext, T>(
         context.template device_context<DeviceContext>(), false, false,
         batch_size, 2 * frame_size, frame_size, 1, hidden_prev_data, frame_size,
         weight_data, frame_size * 2, 1, gate_data, frame_size * 3);
+    LOG(ERROR) << "gate_data[:2] += hidden_prev_data * weight_data";
+    LOG(ERROR) << "gate_data[:2]:";
+    log_cuda_data<T>(gate_data, batch_size * 2 * frame_size);
 
     // calculate activited gate
     Eigen::array<int, 2> extents({{batch_size, frame_size}});
     Eigen::array<int, 2> u_offsets({{0, 0}});
     ActCompute(context.Attr<int>("gate_activation"), place,
                g.slice(u_offsets, extents), g.slice(u_offsets, extents));
+
+    LOG(ERROR) << "gate_data[0] = act(gate_data[0])";
+    LOG(ERROR) << "gate_data[0]:";
+    log_cuda_data<T>(gate_data, batch_size * frame_size);
+
+
     auto u = g.slice(u_offsets, extents);  // update gate
     Eigen::array<int, 2> r_offsets({{0, frame_size}});
     ActCompute(context.Attr<int>("gate_activation"), place,
                g.slice(r_offsets, extents), g.slice(r_offsets, extents));
+
+
+    LOG(ERROR) << "gate_data[1] = act(gate_data[1])";
+    LOG(ERROR) << "gate_data[1]:";
+    log_cuda_data<T>(gate_data + frame_size, batch_size * frame_size);
+
     auto r = g.slice(r_offsets, extents);  // reset gate
     r_h_p.device(place) = r * h_p;         // reset previous hidden state
+
+    LOG(ERROR) << "reset_hidden_prev = gate_data[0] * hidden_prev";
+    LOG(ERROR) << "reset_hidden_prev:";
+    log_cuda_data<T>(reset_hidden_prev_data, batch_size * frame_size);
+
     math::gemm<DeviceContext, T>(
         context.template device_context<DeviceContext>(), false, false,
         batch_size, frame_size, frame_size, 1, reset_hidden_prev_data,
         frame_size, weight_data + frame_size * frame_size * 2, frame_size, 1,
         gate_data + frame_size * 2, frame_size * 3);
 
+    LOG(ERROR) << "gate_data[2] += reset_hidden_prev * weight[2]";
+    LOG(ERROR) << "gate_data[2]:";
+    log_cuda_data<T>(gate_data + frame_size * 2, batch_size * frame_size);
+    LOG(ERROR) << "weight[2]:";
+    log_cuda_data<T>(weight_data + frame_size * frame_size * 2, frame_size * frame_size);
+
     Eigen::array<int, 2> c_offsets({{0, frame_size * 2}});
     ActCompute(context.Attr<int>("activation"), place,
                g.slice(c_offsets, extents), g.slice(c_offsets, extents));
+    LOG(ERROR) << "gate_data[2] = tanh(gate_data[2])";
+    LOG(ERROR) << "gate_data[2]:";
+    log_cuda_data<T>(gate_data + frame_size * 2, batch_size * frame_size);
     auto c = g.slice(c_offsets, extents);  // output candidate
 
     // calculate final output
     h.device(place) = u * (c - h_p) + h_p;
+    LOG(ERROR) << "hidden_output = gate_data[1] * (gate_data[2] - hidden_prev) + hidden_prev";
+    LOG(ERROR) << "hidden_output: "<<endl;
+    log_cuda_data<T>(hidden->data<T>(), batch_size * frame_size);
   }
 };
 
