@@ -1856,6 +1856,7 @@ def conv2d_transpose(input,
             'strides': stride,
             'paddings': padding,
             'dilations': dilation,
+            'groups': groups,
             'use_cudnn': use_cudnn
         })
 
