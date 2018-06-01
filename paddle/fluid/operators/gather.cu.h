@@ -68,8 +68,6 @@ void GPUGather(const platform::DeviceContext& ctx, const Tensor& src,
   int block = 512;
   int n = slice_size * index_size;
   int grid = (n + block - 1) / block;
-  LOG(ERROR) << "slice_size: " << slice_size;
-  LOG(ERROR) << "index_size: " << index_size;
   GatherCUDAKernel<T><<<
       grid, block, 0,
       reinterpret_cast<const platform::CUDADeviceContext&>(ctx).stream()>>>(
