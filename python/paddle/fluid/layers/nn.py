@@ -4095,9 +4095,9 @@ def mean_iou(input, label, num_classes):
     """
     helper = LayerHelper('mean_iou', **locals())
     dtype = helper.input_dtype()
-    out_mean_iou = helper.create_tmp_variable(dtype)
-    out_wrong = helper.create_tmp_variable(dtype)
-    out_correct = helper.create_tmp_variable(dtype)
+    out_mean_iou = helper.create_tmp_variable(dtype='float32')
+    out_wrong = helper.create_tmp_variable(dtype='int32')
+    out_correct = helper.create_tmp_variable(dtype='int32')
     helper.append_op(
         type="mean_iou",
         inputs={"predictions": input,
@@ -4108,7 +4108,7 @@ def mean_iou(input, label, num_classes):
             "out_correct": out_correct
         },
         attrs={"num_classes": num_classes})
-    return out_mean_iou
+    return out_mean_iou, out_wrong, out_correct
 
 
 def random_crop(input, shape, seed=1):
