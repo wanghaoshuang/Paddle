@@ -19,9 +19,10 @@ from ..layer_helper import LayerHelper
 from ..initializer import Normal, Constant
 from ..framework import Variable
 from ..param_attr import ParamAttr
-from layer_function_generator import autodoc
+from layer_function_generator import autodoc, templatedoc
 from tensor import concat
 import utils
+import random
 
 __all__ = [
     'fc',
@@ -81,9 +82,11 @@ __all__ = [
     'label_smooth',
     'roi_pool',
     'dice_loss',
-    'upsampling_bilinear2d',
-    'gather',
     'mean_iou',
+    'image_resize',
+    'image_resize_short',
+    'resize_bilinear',
+    'gather',
     'random_crop',
 ]
 
@@ -181,11 +184,8 @@ def fc(input,
             inputs={"X": input_var,
                     "Y": w},
             outputs={"Out": tmp},
-            attrs={
-                "x_num_col_dims": num_flatten_dims,
-                "y_num_col_dims": 1,
-                "use_mkldnn": use_mkldnn
-            })
+            attrs={"x_num_col_dims": num_flatten_dims,
+                   "y_num_col_dims": 1})
         mul_results.append(tmp)
 
     if len(mul_results) == 1:
@@ -803,7 +803,22 @@ def gru_unit(input,
     return updated_hidden, reset_hidden_pre, gate
 
 
+@templatedoc()
 def linear_chain_crf(input, label, param_attr=None):
+    """
+    Linear Chain CRF.
+
+    ${comment}
+
+    Args:
+        input(${emission_type}): ${emission_comment}
+        label(${label_type}): ${label_comment}
+        param_attr(ParamAttr): The attribute of the learnable parameter.
+
+    Returns:
+        ${log_likelihood_comment}
+
+    """
     helper = LayerHelper('linear_chain_crf', **locals())
     size = input.shape[1]
     transition = helper.create_parameter(
@@ -829,7 +844,19 @@ def linear_chain_crf(input, label, param_attr=None):
     return log_likelihood
 
 
+@templatedoc()
 def crf_decoding(input, param_attr, label=None):
+    """
+    ${comment}
+
+    Args:
+        input(${emission_type}): ${emission_comment}
+        param_attr(ParamAttr): The parameter attribute for training.
+        label(${label_type}): ${label_comment}
+
+    Returns:
+        ${viterbi_path_comment}
+    """
     helper = LayerHelper('crf_decoding', **locals())
     transition = helper.get_parameter(param_attr.name)
     viterbi_path = helper.create_tmp_variable(dtype=helper.input_dtype())
@@ -1184,19 +1211,19 @@ def conv2d(input,
 
         - Input:
 
-          Input shape: $(N, C_{in}, H_{in}, W_{in})$
+          Input shape: :math:`(N, C_{in}, H_{in}, W_{in})`
 
-          Filter shape: $(C_{out}, C_{in}, H_f, W_f)$
+          Filter shape: :math:`(C_{out}, C_{in}, H_f, W_f)`
 
         - Output:
-          Output shape: $(N, C_{out}, H_{out}, W_{out})$
+          Output shape: :math:`(N, C_{out}, H_{out}, W_{out})`
 
         Where
 
         .. math::
 
-        H_{out}&= \\frac{(H_{in} + 2 * paddings[0] - (dilations[0] * (H_f - 1) + 1))}{strides[0]} + 1 \\\\
-        W_{out}&= \\frac{(W_{in} + 2 * paddings[1] - (dilations[1] * (W_f - 1) + 1))}{strides[1]} + 1
+            H_{out}&= \\frac{(H_{in} + 2 * paddings[0] - (dilations[0] * (H_f - 1) + 1))}{strides[0]} + 1 \\\\
+            W_{out}&= \\frac{(W_{in} + 2 * paddings[1] - (dilations[1] * (W_f - 1) + 1))}{strides[1]} + 1
 
     Args:
        input(Variable): The input image with [N, C, H, W] format.
@@ -3894,7 +3921,6 @@ def roi_pool(input, rois, pooled_height=1, pooled_width=1, spatial_scale=1.0):
 
 def dice_loss(input, label, epsilon=0.00001):
     """
-    **Dice loss Layer**
     Dice loss for comparing the similarity of two batch of data,
     usually is used for binary image segmentation i.e. labels are binary.
     The dice loss can be defined as below equation:
@@ -3934,30 +3960,35 @@ def dice_loss(input, label, epsilon=0.00001):
     return reduce_mean(dice_score)
 
 
-def upsampling_bilinear2d(input, out_shape=None, scale=None, name=None):
+def image_resize(input,
+                 out_shape=None,
+                 scale=None,
+                 name=None,
+                 resample='BILINEAR'):
     """
-    The mathematical meaning of upsampling_bilinear2d is also called
-    Bilinear interpolation.
-    Bilinear interpolation is an extension of linear interpolation for
-    interpolating functions of two variables (e.g. H-direction and
-    W-direction in this layer) on a rectilinear 2D grid.
+    Resize a batch of images.
 
-    For details, please refer to Wikipedia:
-    https://en.wikipedia.org/wiki/Bilinear_interpolation
+    The input must be a tensor of the shape (num_batches, channels, in_h, in_w), 
+    and the resizing only applies on the last two dimensions(hight and width).
+
+    Supporting resample methods:
+        'BILINEAR' : Bilinear interpolation
 
     Args:
-        input (Variable): The input tensor of bilinear interpolation,
+        input (Variable): The input tensor of image resize layer,
                           This is a 4-D tensor of the shape
                           (num_batches, channels, in_h, in_w).
-        out_shape(list|tuple|Variable|None): Output shape of bilinear interpolation
+        out_shape(list|tuple|Variable|None): Output shape of image resize
                                     layer, the shape is (out_h, out_w).
                                     Default: None
-        scale(int|None): The multiplier for the input height or width.
+        scale(float|None): The multiplier for the input height or width.
                          At least one of out_shape or scale must be set.
                          And out_shape has a higher priority than scale.
                          Default: None
         name(str|None): A name for this layer(optional). If set None, the layer
                         will be named automatically.
+        resample(str): The resample method. It can only be 'BILINEAR' currently.
+                       Default: 'BILINEAR'
 
     Returns:
         out (Variable): The output is a 4-D tensor of the shape
@@ -3966,8 +3997,12 @@ def upsampling_bilinear2d(input, out_shape=None, scale=None, name=None):
     Examples:
         .. code-block:: python
 
-            out = fluid.layers.bilinear_interp(input, out_shape=[12, 12])
+            out = fluid.layers.image_resize(input, out_shape=[12, 12])
     """
+    resample_methods = {'BILINEAR': 'bilinear_interp'}
+    if resample not in resample_methods:
+        raise ValueError(
+            "The 'resample' of image_resize can only be 'BILINEAR' currently.")
     if out_shape is None and scale is None:
         raise ValueError("One of out_shape and scale must not be None")
     helper = LayerHelper('bilinear_interp', **locals())
@@ -3980,10 +4015,9 @@ def upsampling_bilinear2d(input, out_shape=None, scale=None, name=None):
     out_w = 0
     inputs = {"X": input}
     if out_shape is not None:
-        if not (_is_list_or_turple_(out_shape) and len(out_shape) == 2) and (
-                out_shape is not Variable):
-            raise ValueError('out_shape should be a list or tuple ',
-                             'with length 2, (out_h, out_w).')
+        if not (_is_list_or_turple_(out_shape) and
+                len(out_shape) == 2) and not isinstance(out_shape, Variable):
+            raise ValueError('out_shape should be a list or tuple or variable')
         if _is_list_or_turple_(out_shape):
             out_shape = list(map(int, out_shape))
             out_h = out_shape[0]
@@ -3996,7 +4030,7 @@ def upsampling_bilinear2d(input, out_shape=None, scale=None, name=None):
 
     out = helper.create_tmp_variable(dtype)
     helper.append_op(
-        type="bilinear_interp",
+        type=resample_methods[resample],
         inputs=inputs,
         outputs={"Out": out},
         attrs={"out_h": out_h,
@@ -4004,95 +4038,116 @@ def upsampling_bilinear2d(input, out_shape=None, scale=None, name=None):
     return out
 
 
-def gather(input, index):
+@templatedoc(op_type="bilinear_interp")
+def resize_bilinear(input, out_shape=None, scale=None, name=None):
     """
-    **Gather Operator**
-
-    Out is obtained by gathering entries of the outer-most dimension 
-    of X indexed by Index and concatenate them together.
-
-    .. math::
-
-	Out = X[Index]
-
-
-    .. code-block:: text
-
-	* Case 1:
-
-    		 X = [[1, 2],
-         	      [3, 4],
-                      [5, 6]]
-
-                Index = [1, 2]
-
-                Then:
-
-                Out = [[3, 4],
-                       [5, 6]]
+    ${comment}
 
     Args:
-        input (Variable): The source input with rank>1. 
-        index (Variable): The index input with rang=1.
+        input(${x_type}): ${x_comment}.
+
+        out_shape(${out_size_type}): ${out_size_comment}.
+
+        scale(float|None): The multiplier for the input height or width. At
+             least one of out_shape or scale must be set. And out_shape has
+             a higher priority than scale. Default: None.
+
+        name(str|None): The output variable name.
 
     Returns:
-        output (Variable): The output is a tensor with the same shape as input.
+
+        ${out_comment}.
+    """
+
+    return image_resize(input, out_shape, scale, name, 'BILINEAR')
+
+
+def image_resize_short(input, out_short_len, resample='BILINEAR'):
+    """
+    Resize a batch of images. The short edge of input images will be 
+    resized to the given 'out_short_len'. The long edge of input images 
+    will be resized proportionately to make images' length-width ratio 
+    constant.
+
+    Args:
+        input (Variable): The input tensor of image resize layer,
+                          This is a 4-D tensor of the shape
+                          (num_batches, channels, in_h, in_w).
+        out_short_len(int): The length of output images' short edge.
+
+    Returns:
+        out (Variable): The output is a 4-D tensor of the shape
+                        (num_batches, channls, out_h, out_w).
+    """
+    in_shape = input.shape
+    if len(in_shape) != 4:
+        raise ValueError(
+            "The rank of input must be 4 (num_batches, channels, in_h, in_w).")
+    hw = in_shape[2:4]
+    short_idx = hw.index(min(hw))
+    long_idx = 1 - short_idx
+    out_shape = list(hw)
+    out_shape[short_idx] = out_short_len
+    out_shape[long_idx] = int(
+        float(out_shape[long_idx]) * (float(out_short_len) / float(hw[
+            short_idx])) + 0.5)
+    return image_resize(input=input, out_shape=out_shape, resample=resample)
+
+
+
+
+@templatedoc()
+def random_crop(x, shape, seed=None):
+    """
+    ${comment}
 
     Examples:
-        .. code-block:: python
+        >>> img = fluid.layers.data("img", [3, 256, 256])
+        >>> cropped_img = fluid.layers.random_crop(img, shape=[3, 224, 224])
 
-            output = fluid.layers.gather(x, index)
+    Args:
+        x(${x_type}): ${x_comment}
+        shape(${shape_type}): ${shape_comment}
+        seed(int|${seed_type}|None): ${seed_comment} By default, the seed will
+            get from `random.randint(-65536, 65535)`.
+
+    Returns:
+        ${out_comment}
+
     """
-    helper = LayerHelper('gather', **locals())
+    helper = LayerHelper("random_crop", **locals())
     dtype = helper.input_dtype()
     out = helper.create_tmp_variable(dtype)
+    if seed is None:
+        seed = random.randint(-65536, 65535)
+
+    if isinstance(seed, int):
+        seed_value = seed
+        seed = helper.create_tmp_variable(dtype="int64")
+        helper.append_op(
+            type="fill_constant",
+            inputs={},
+            outputs={"Out": seed},
+            attrs={
+                "dtype": seed.dtype,
+                "shape": [1],
+                "value": float(seed_value),
+                "force_cpu": True
+            })
+    elif not isinstance(seed, Variable):
+        raise ValueError("'seed' must be a Variable or an int.")
+    seed_out = helper.create_tmp_variable(dtype="int64")
     helper.append_op(
-        type="gather",
+        type="random_crop",
         inputs={"X": input,
-                "Index": index},
-        outputs={"Out": out})
+                "Seed": seed},
+        outputs={"Out": out,
+                 "SeedOut": seed_out},
+        attrs={"shape": shape})
     return out
 
 
 def mean_iou(input, label, num_classes):
-    """
-    **Gather Operator**
-
-    Out is obtained by gathering entries of the outer-most dimension 
-    of X indexed by Index and concatenate them together.
-
-    .. math::
-
-	Out = X[Index]
-
-
-    .. code-block:: text
-
-	* Case 1:
-
-    		 X = [[1, 2],
-         	      [3, 4],
-                      [5, 6]]
-
-                Index = [1, 2]
-
-                Then:
-
-                Out = [[3, 4],
-                       [5, 6]]
-
-    Args:
-        input (Variable): The source input with rank>1. 
-        index (Variable): The index input with rang=1.
-
-    Returns:
-        output (Variable): The output is a tensor with the same shape as input.
-
-    Examples:
-        .. code-block:: python
-
-            output = fluid.layers.gather(x, index)
-    """
     helper = LayerHelper('mean_iou', **locals())
     dtype = helper.input_dtype()
     out_mean_iou = helper.create_tmp_variable(dtype='float32')
@@ -4111,30 +4166,51 @@ def mean_iou(input, label, num_classes):
     return out_mean_iou, out_wrong, out_correct
 
 
-def random_crop(input, shape, seed=1):
-    helper = LayerHelper("random_crop", **locals())
+def gather(input, index):
+    """
+    **Gather Operator**
+
+    Out is obtained by gathering entries of the outer-most dimension 
+    of X indexed by Index and concatenate them together.
+
+    .. math::
+
+	Out = X[Index]
+
+    .. code-block:: text
+
+                Given:
+
+                X = [[1, 2],
+                     [3, 4],
+                     [5, 6]]
+
+                Index = [1, 2]
+
+                Then:
+
+                Out = [[3, 4],
+                       [5, 6]]
+
+    Args:
+        input (Variable): The source input with rank>=1. 
+        index (Variable): The index input with rank=1.
+
+    Returns:
+        output (Variable): The output is a tensor with the same rank as input.
+
+    Examples:
+        .. code-block:: python
+
+            output = fluid.layers.gather(x, index)
+    """
+    helper = LayerHelper('gather', **locals())
     dtype = helper.input_dtype()
     out = helper.create_tmp_variable(dtype)
-    if isinstance(seed, int):
-        seed_value = seed
-        seed = helper.create_tmp_variable(dtype="int64")
-        helper.append_op(
-            type="fill_constant",
-            inputs={},
-            outputs={"Out": seed},
-            attrs={
-                "dtype": seed.dtype,
-                "shape": [1],
-                "value": float(seed_value)
-            })
-    elif not isinstance(seed, Variable):
-        raise ValueError("'seed' must be a Variable or an int.")
-    seed_out = helper.create_tmp_variable(dtype="int64")
     helper.append_op(
-        type="random_crop",
+        type="gather",
         inputs={"X": input,
-                "Seed": seed},
-        outputs={"Out": out,
-                 "SeedOut": seed_out},
-        attrs={"shape": shape})
+                "Index": index},
+        outputs={"Out": out})
     return out
+

@@ -56,7 +56,7 @@ class BilinearInterpOpMaker : public framework::OpProtoAndCheckerMaker {
  public:
   void Make() override {
     AddInput("X",
-             "(Tensor) The input tensor of bilinear interpolation, "
+             "The input tensor of bilinear interpolation, "
              "This is a 4-D tensor with shape of (N x C x h x w)");
     AddInput("OutSize",
              "(Tensor) This is a 1-D tensor with two number. "
@@ -65,8 +65,8 @@ class BilinearInterpOpMaker : public framework::OpProtoAndCheckerMaker {
     AddOutput("Out",
               "(Tensor) The dimension of output is (N x C x out_h x out_w]");
 
-    AddAttr<int>("out_h", "(int) output height of bilinear interpolation op.");
-    AddAttr<int>("out_w", "(int) output width of bilinear interpolation op.");
+    AddAttr<int>("out_h", "output height of bilinear interpolation op.");
+    AddAttr<int>("out_w", "output width of bilinear interpolation op.");
     AddComment(R"DOC(
           Bilinear interpolation is an extension of linear interpolation for 
           interpolating functions of two variables (e.g. H-direction and 
