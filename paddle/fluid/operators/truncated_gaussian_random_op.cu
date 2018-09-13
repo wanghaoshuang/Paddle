@@ -41,7 +41,7 @@ struct TruncatedNormal {
     rng.discard(n);
     T value = dist(rng);
     auto p = a_normal_cdf_ + (b_normal_cdf_ - a_normal_cdf_) * value;
-    return (std::sqrt(2.0) * erfinvf(2 * p - 1) + mean_) / std_;
+    return (std::sqrt(2.0) * erfinvf(2 * p - 1) + mean_) * std_;
   }
 };
 

@@ -74,6 +74,20 @@ static DDim GetDims(const Scope& scope, const std::string& name,
   }
 }
 
+static platform::Place GetPlace(const Scope& scope, const std::string& name) {
+  Variable* var = scope.FindVar(name);
+  if (var == nullptr) {
+    return platform::CPUPlace();
+  }
+
+  if (var->IsType<LoDTensor>()) {
+    const LoDTensor& tensor = var->Get<LoDTensor>();
+    return tensor.place();
+  } else {
+    return platform::CPUPlace();
+  }
+}
+
 static bool VarInited(const Scope& scope, const std::string& name) {
   Variable* var = scope.FindVar(name);
   if (var == nullptr) return false;
@@ -221,6 +235,7 @@ std::string OperatorBase::DebugStringEx(const Scope* scope) const {
           ss << ":" << dtype;
           ss << "[" << GetDims(*scope, var_name, true) << "]";
           ss << "(" << GetLoD(*scope, var_name) << ")";
+          ss << "(" << GetPlace(*scope, var_name) << ")";
         }
       }
       if (i != input.second.size() - 1) {

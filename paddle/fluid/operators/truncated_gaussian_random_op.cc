@@ -148,7 +148,7 @@ struct TruncatedNormal {
 
   T operator()(T value) const {
     auto p = a_normal_cdf_ + (b_normal_cdf_ - a_normal_cdf_) * value;
-    return (std::sqrt(2.0) * erfinv(2 * p - 1) + mean_) / std_;
+    return (std::sqrt(2.0) * erfinv(2 * p - 1) + mean_) * std_;
   }
 };
 
