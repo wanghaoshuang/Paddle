@@ -205,6 +205,29 @@ ParallelExecutor::ParallelExecutor(
   member_->executor_.reset(new details::ScopeBufferedSSAGraphExecutor(
       exec_strategy, member_->local_scopes_, std::move(var_infos),
       member_->places_, std::move(member_->executor_)));
+
+  //  for (size_t i = 0; i < member_->places_.size(); ++i) {
+  //    LOG(ERROR) << "------------------scope[" << i << "]----------------";
+  //    auto scope = member_->local_scopes_[i];
+  //    std::vector<std::string> var_names = scope->LocalVarNames();
+  //    LOG(ERROR) << "vars number: " << var_names.size();
+  //    for (size_t j = 0; j < var_names.size(); ++j) {
+  //         auto var = scope->FindVar(var_names[j]);
+  //         LOG(ERROR) << "var name: " << var_names[j] << "; IsInitialized(): "
+  //         << var->IsInitialized();
+  //         if (var->IsInitialized()) {
+  //             if (var->IsType<framework::Tensor>()) {
+  //               LOG(ERROR) << "    place: " <<
+  //               var->Get<framework::Tensor>().place();
+  //             } else if (var->IsType<framework::LoDTensor>()) {
+  //               LOG(ERROR) << "    place: " <<
+  //               var->Get<framework::LoDTensor>().place();
+  //             }
+  //         }
+  //    }
+  //
+  //  }
+  //
 }
 
 void ParallelExecutor::BCastParamsToDevices(

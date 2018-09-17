@@ -73,6 +73,7 @@ class ParallelExecutor(object):
                  build_strategy=None,
                  num_trainers=1,
                  trainer_id=0,
+                 variables=None,
                  **kwargs):
         if len(kwargs) != 0:
             err_msg = ""
@@ -145,21 +146,23 @@ class ParallelExecutor(object):
         local_scopes = share_vars_from.executor.local_scopes(
         ) if share_vars_from else []
 
+        variables = variables if variables else main.list_vars()
         self.persistable_vars = [
-            v.name for v in [
-                var for var in main.list_vars()
-                if var.persistable and var.type != core.VarDesc.VarType.RAW
-            ]
+            var for var in variables
+            if var.persistable and var.type != core.VarDesc.VarType.RAW
+        ]
+
+        parameters = [
+            v for v in variables if isinstance(v, framework.Parameter)
         ]
 
         self.executor = core.ParallelExecutor(
             self._places,
             set([
-                cpt.to_text(p.name)
-                for p in main.global_block().iter_parameters()
-                if not p.stop_gradient
+                cpt.to_text(p.name) for p in parameters if not p.stop_gradient
             ]),
-            set(cpt.to_text(var) for var in self.persistable_vars), main.desc,
+            set(cpt.to_text(var.name)
+                for var in self.persistable_vars), main.desc,
             cpt.to_text(loss_name)
             if loss_name else six.u(''), scope, local_scopes, exec_strategy,
             build_strategy, num_trainers, trainer_id)
