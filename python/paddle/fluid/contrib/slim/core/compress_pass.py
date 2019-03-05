@@ -36,9 +36,7 @@ logging.basicConfig(level=logging.INFO, format=FORMAT, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 
-def FeedReader(reader, feed_list, place, program=None):
-    feeder = DataFeeder(feed_list, place, program)
-
+def FeedReader(reader, feeder):
     def feed(data, feeder):
         return feeder.feed(data)
 
@@ -73,12 +71,6 @@ def cached_reader(reader, sampled_rate, cache_path, cached_id):
 class Context(object):
     """
     The context in the process of compression.
-    Args:
-        exe: The executor used to execute graph.
-        graph: The graph to be compressed.
-        scope: The scope used to execute graph.
-        program_exe: The program_exe is used to execute the program
-                     created for modifying the variables in scope.
     """
 
     def __init__(self,
@@ -179,15 +171,6 @@ class Context(object):
 class CompressPass(object):
     """
     The pass used to compress model.
-    Args:
-        place: The device used in compression.
-        data_reader: The data_reader used to run graph.
-        data_feeder: The data_feeder used to run graph.
-        scope: The scope used to run graph.
-        metrics: The metrics for evaluating model.
-        epoch: The total epoches of trainning in compression.
-        program_exe: The program_exe is used to execute the program
-                     created for modifying the variables in scope.
     """
 
     def __init__(self,
@@ -208,21 +191,26 @@ class CompressPass(object):
         self.strategies = []
         self.epoch = 0
         self.place = CPUPlace() if place is None else place
-        self.train_graph = ImitationGraph(
+        self.train_graph = Graph(
             train_program,
-            scope=scope,
+            scope,
             in_nodes=train_feed_list,
-            out_nodes=train_fetch_list)
-        self.eval_graph = ImitationGraph(
+            out_nodes=train_fetch_list,
+            place=self.place)
+        self.eval_graph = Graph(
             eval_program,
-            scope=scope,
+            scope,
             in_nodes=eval_feed_list,
-            out_nodes=eval_fetch_list)
+            out_nodes=eval_fetch_list,
+            place=self.place,
+            for_test=True)
         self.train_reader = train_reader
         self.eval_reader = eval_reader
         self.teacher_graphs = []
         for teacher in teacher_programs:
-            self.teacher_graphs.append(ImitationGraph(teacher, scope=scope))
+            self.teacher_graphs.append(
+                Graph(
+                    teacher, scope, place=self.place, for_test=True))
 
         self.checkpoint = None
         self.checkpoint_path = checkpoint_path
@@ -303,19 +291,12 @@ class CompressPass(object):
 
         executor = get_executor(context.optimize_graph, self.place)
 
-        feed_reader = FeedReader(
-            context.train_reader,
-            context.optimize_graph.in_nodes.values(),
-            self.place,
-            program=context.optimize_graph.program)
+        feed_reader = FeedReader(context.train_reader,
+                                 context.optimize_graph.data_feeder)
 
-        if context.optimize_graph.compiled_graph is None:
-            context.optimize_graph.compiled_graph = compiler.CompiledProgram(
-                context.optimize_graph.program).with_data_parallel(
-                    loss_name=context.optimize_graph.out_nodes['loss'])
+        context.optimize_graph.re_compile()
 
         for feed in feed_reader():
-            #        for data in context.train_reader():
             for strategy in self.strategies:
                 strategy.on_batch_begin(context)
             results = executor.run(context.optimize_graph, data=None, feed=feed)
