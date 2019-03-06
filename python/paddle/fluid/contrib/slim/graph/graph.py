@@ -38,7 +38,56 @@ __all__ = [
 ]
 
 
-class Graph(Graph):
+class Var(object):
+    def __init__(ir_var_node):
+        self.ir_var_node = ir_var_node
+
+    @property
+    def name(self):
+        pass
+
+    @property
+    def shape(self):
+        pass
+
+    def set_shape(self):
+        pass
+
+
+class Param(Var):
+    def __init__(ir_var_node):
+        self.ir_var_node = ir_var_node
+
+
+class Op(object):
+    def __init__(self, ir_op_node):
+        self.ir_op_node = ir_op_node
+
+    def input_var_names(self):
+        pass
+
+    def output_var_names(self):
+        pass
+
+    @property
+    def idx(self):
+        pass
+
+    @property
+    def type(self):
+        pass
+
+    def is_bwd_op(self):
+        pass
+
+    def var_names_of_input(self, input_name):
+        pass
+
+    def set_attr(self, key, value):
+        pass
+
+
+class Graph(object):
     def __init__(self,
                  program,
                  scope,
@@ -48,6 +97,10 @@ class Graph(Graph):
                  for_test=False):
         super(Graph, self).__init__()
         self.program = Program() if program is None else program
+        param_names = []
+        for block in program.blocks:
+            param_names += [param.name for param in block.all_parameters()]
+        param_names = set(param_names)
 
         self.data_feeder = DataFeeder(
             feed_list=in_nodes.values, place, program=program)
@@ -84,72 +137,13 @@ class Graph(Graph):
                 attr_name))
 
     def all_parameters(self):
-        return self.program.block(0).all_parameters()
-
-    def create_parameter(self, *args, **kwargs):
-        return self.program.block(0).create_parameter(*args, **kwargs)
-
-    def all_vars(self):
-        for each_var in list(self.program.block(0).vars.values()):
-            yield each_var
-
-    def vars_map(self):
-        return self.program.block(0).vars
+        return [self.var(param_name) for param_name in param_names]
 
     def all_ops(self):
-        return self.program.block(0).ops
-
-    def index(self, op):
-        return self.program.block(0).ops.index(op)
+        return [Op(op_node) for op_node in self.ir_graph.all_op_nodes()]
 
     def var(self, name):
-        return self.program.block(0).var(name)
-
-    def create_var(self, *args, **kwargs):
-        return self.program.block(0).create_var(*args, **kwargs)
-
-    def remove_var(self, name):
-        self.program.block(0)._remove_var(name)
-
-    def insert_op(self, index, *args, **kwargs):
-        return self.program.block(0)._insert_op(index=index, *args, **kwargs)
-
-    def prepend_op(self, *args, **kwargs):
-        return self.program.block(0)._prepend_op(*args, **kwargs)
-
-    def remove_op(self, index):
-        self.program.block(0)._remove_op(index)
-
-    def prune(self, feeds, fetches):
-        if not isinstance(feeds, Iterable):
-            feeds = [feeds]
-
-        if not isinstance(fetches, Iterable):
-            fetches = [fetches]
-
-        program = self.program._prune(fetches)
-
-        feeds = [
-            feed.name if isinstance(feed, Variable) else feed for feed in feeds
-        ]
-        fetches = [
-            fetch.name if isinstance(fetch, Variable) else fetch
-            for fetch in fetches
-        ]
-
-        in_nodes = OrderedDict([(key, value)
-                                for key, value in self.in_nodes.items()
-                                if value in feeds])
-        #        print "feeds: %s" % (feeds, )
-        #        print "self.in_nodes: %s" % (self.in_nodes, )
-        #        print "in_nodes after pruning: %s" % (in_nodes, )
-        out_nodes = OrderedDict([(key, value)
-                                 for key, value in self.out_nodes.items()
-                                 if value in fetches])
-        return ImitationGraph(program, self.scope, in_nodes, out_nodes)
-
-    def get_var(self, var_name):
-        return self.program.global_block().var(var_name)
+        return Var(self.ir_graph.var_node(name))
 
     def clone(self, for_test=False):
         return ImitationGraph(
