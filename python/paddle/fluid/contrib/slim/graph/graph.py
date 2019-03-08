@@ -145,10 +145,10 @@ class Graph(object):
     def var(self, name):
         return Var(self.ir_graph.var_node(name))
 
-    def clone(self, for_test=False):
-        return ImitationGraph(
-            self.program.clone(for_test), self.scope,
-            copy.deepcopy(self.in_nodes), copy.deepcopy(self.out_nodes))
+    def clone(self):
+        return Graph(self.program.clone(), self.scope,
+                     copy.deepcopy(self.in_nodes),
+                     copy.deepcopy(self.out_nodes))
 
     def merge(self, graph):
         for var in graph.program.list_vars():
