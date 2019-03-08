@@ -35,6 +35,7 @@ __all__ = [
     'save_persistables',
     'update_depthwise_conv',
     'update_param_shape',
+    'infer_shape',
 ]
 
 
@@ -293,6 +294,12 @@ def update_param_shape(graph):
         tensor_shape = np.array(graph.scope.find_var(param.name).get_tensor(
         )).shape
         param.desc.set_shape(tensor_shape)
+
+
+def infer_shape(graph):
+    for op in graph.all_ops():
+        if op.type != 'conditional_block':
+            op.desc.infer_shape(op.block.desc)
 
 
 def update_depthwise_conv(graph):
