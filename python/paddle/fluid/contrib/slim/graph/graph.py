@@ -63,6 +63,18 @@ class Param(Var):
         self.ir_var_node = ir_var_node
 
 
+OPTIMIZER_OPS = [
+    'momentum',
+    'lars_momentum',
+    'adagrad',
+    'adam',
+    'adamax',
+    'decayed_adagrad',
+    'adadelta',
+    'rmsprop',
+]
+
+
 class Op(object):
     def __init__(self, ir_op_node):
         self.ir_op_node = ir_op_node
@@ -96,6 +108,9 @@ class Op(object):
 
     def is_bwd_op(self):
         return self.type.endswith('_grad')
+
+    def is_opt_op(self):
+        return op.type in OPTIMIZER_OPS
 
     def vars_of_input(self, input_name):
         return [Var(in_var) for in_var in self.ir_op_node.input(input_name)]
@@ -162,7 +177,12 @@ class Graph(object):
     def all_vars(self):
         return [Var(var) for var in self.ir_graph.all_var_nodes()]
 
-    def all_ops(self):
+    @property
+    def scope(self):
+        return self.scope
+
+    @property
+    def ops(self):
         return [Op(op_node) for op_node in self.ir_graph.all_op_nodes()]
 
     def var(self, name):
@@ -205,7 +225,7 @@ class Graph(object):
         b_vars = {}
         for var in self.all_vars():
             b_vars[var.name] = var
-        for op in self.all_ops():
+        for op in self.ops:
             if op.type in ['conv2d', 'depthwise_conv2d', 'mul']:
                 _, _, _, flop = _count_shape_params_flops(b_vars, op)
                 ret += flop
@@ -286,12 +306,12 @@ class Graph(object):
             param.desc.set_shape(tensor_shape)
 
     def infer_shape(self):
-        for op in self.all_ops():
+        for op in self.ops:
             if op.type != 'conditional_block':
                 op.infer_shape()
 
     def update_groups_of_conv(self):
-        for op in self.all_ops():
+        for op in self.ops:
             if op.type == 'depthwise_conv2d':
                 op.set_attr('groups', op.vars_of_input('Filter')[0].shape[0])
 
