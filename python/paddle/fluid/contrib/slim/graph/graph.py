@@ -28,14 +28,9 @@ import pickle
 import os
 
 __all__ = [
+    'Var',
+    'Op',
     'Graph',
-    'save_inference_graph_model',
-    'load_inference_graph_model',
-    'load_persistables',
-    'save_persistables',
-    'update_depthwise_conv',
-    'update_param_shape',
-    'infer_shape',
 ]
 
 
@@ -45,14 +40,22 @@ class Var(object):
 
     @property
     def name(self):
-        pass
+        return self.ir_var_node.name
 
     @property
     def shape(self):
-        pass
+        return self.ir_var_node.shape
 
-    def set_shape(self):
-        pass
+    def set_shape(self, shape):
+        return self.ir_var_node.set_shape(shape)
+
+    @property
+    def input_ops(self):
+        return [Op(in_op) for in_op in self.ir_var_node.inputs]
+
+    @property
+    def output_ops(self):
+        return [Op(out_op) for out_op in self.ir_var_node.outputs]
 
 
 class Param(Var):
@@ -64,28 +67,44 @@ class Op(object):
     def __init__(self, ir_op_node):
         self.ir_op_node = ir_op_node
 
+    @property
     def input_var_names(self):
-        pass
+        return [in_var.name for in_var in self.input_vars()]
 
+    @property
     def output_var_names(self):
-        pass
+        return [out_var.name for out_var in self.output_vars()]
+
+    @property
+    def input_vars(self):
+        return [Var(in_ir_var) for in_ir_var in self.ir_op_node.inputs]
+
+    @property
+    def output_vars(self):
+        return [Var(out_ir_var) for out_ir_var in self.ir_op_node.outputs]
 
     @property
     def idx(self):
-        pass
+        return self.ir_op_node.id()
 
     @property
     def type(self):
-        pass
+        return self.ir_op_node.op().type()
+
+    def infer_shape(self):
+        return self.ir_op_node.op().infer_shape(self.ir_op_node.op().block())
 
     def is_bwd_op(self):
-        pass
+        return self.type.endswith('_grad')
+
+    def vars_of_input(self, input_name):
+        return [Var(in_var) for in_var in self.ir_op_node.input(input_name)]
 
     def var_names_of_input(self, input_name):
-        pass
+        return [in_var.name for in_var in self.vars_of_input(input_name)]
 
     def set_attr(self, key, value):
-        pass
+        self.ir_op_node.set_attr(key, value)
 
 
 class Graph(object):
@@ -98,10 +117,10 @@ class Graph(object):
                  for_test=False):
         super(Graph, self).__init__()
         self.program = Program() if program is None else program
-        param_names = []
+        self.param_names = []
         for block in program.blocks:
-            param_names += [param.name for param in block.all_parameters()]
-        param_names = set(param_names)
+            self.param_names += [param.name for param in block.all_parameters()]
+        self.param_names = set(self.param_names)
 
         self.data_feeder = DataFeeder(
             feed_list=in_nodes.values, place, program=program)
@@ -140,6 +159,9 @@ class Graph(object):
     def all_parameters(self):
         return [self.var(param_name) for param_name in param_names]
 
+    def all_vars(self):
+        return [Var(var) for var in self.ir_graph.all_var_nodes()]
+
     def all_ops(self):
         return [Op(op_node) for op_node in self.ir_graph.all_op_nodes()]
 
@@ -147,85 +169,41 @@ class Graph(object):
         return Var(self.ir_graph.var_node(name))
 
     def clone(self):
+        # TODO(wanghaoshuang@baidu.com): use clone function of IrGraph
         return Graph(self.program.clone(), self.scope,
                      copy.deepcopy(self.in_nodes),
                      copy.deepcopy(self.out_nodes))
 
-    def merge(self, graph):
-        for var in graph.program.list_vars():
-            self.program.global_block()._clone_variable(var)
-        for op in graph.all_ops():
-            inputs = {}
-            outputs = {}
-            attrs = {}
-            for input_name in op.input_names:
-                inputs[input_name] = [
-                    self.get_var(in_var_name)
-                    for in_var_name in op.input(input_name)
-                ]
-            for output_name in op.output_names:
-                outputs[output_name] = [
-                    self.get_var(out_var_name)
-                    for out_var_name in op.output(output_name)
-                ]
-            for attr_name in op.attr_names:
-                attrs[attr_name] = op.attr(attr_name)
-            self.program.global_block().append_op(
-                type=op.type, inputs=inputs, outputs=outputs, attrs=attrs)
-
-    def ops(self):
-        return self.program.global_block().ops
-
-    def program(self):
-        return self.program
-
     def pre_ops(self, op):
+        """
+        Get all the previous operators of target operator.
+        args:
+            op: Target operator. It should be an instance of class slim.core.Op.
+        return: A list of operators.
+        """
         ops = []
-        in_var_names = []
-        for input_name in op.input_names:
-            in_var_names += op.input(input_name)
-        for p in self.ops():
-            for out_name in p.output_names:
-                for var_name in p.output(out_name):
-                    if var_name in in_var_names:
-                        ops.append(p)
-        return ops
+        for in_var in op.input_vars:
+            for in_op in in_var.input_ops:
+                ops.append(in_op)
 
     def next_ops(self, op):
         ops = []
-        out_var_names = []
-        for o in op.output_names:
-            out_var_names += op.output(o)
-        for p in self.ops():
-            for input_name in p.input_names:
-                for var_name in p.input(input_name):
-                    if var_name in out_var_names:
-                        ops.append(p)
-        return ops
-
-    def get_ops_by_param(self, param):
-        ops = []
-        if isinstance(param, Variable):
-            param = param.name
-        for op in self.ops():
-            for name in op.input_names:
-                if param in op.input(name):
-                    ops.append(op)
+        for out_var in op.output_vars:
+            for out_op in out_var.output_ops:
+                ops.append(out_op)
         return ops
 
     def get_param_by_op(self, op):
         params = []
-        for in_name in op.input_names:
-            for var_name in op.input(in_name):
-                var = self.get_var(var_name)
-                if isinstance(var, Parameter):
-                    params.append(var)
+        for in_var in op.input_vars:
+            if in_var.name in self.param_names:
+                params.append(in_var)
         return params
 
     def flops(self):
         ret = 0
         b_vars = {}
-        for var in self.program.list_vars():
+        for var in self.all_vars():
             b_vars[var.name] = var
         for op in self.all_ops():
             if op.type in ['conv2d', 'depthwise_conv2d', 'mul']:
@@ -242,6 +220,7 @@ class Graph(object):
     def serialize(self):
         data = {}
         data['program'] = self.program
+        data['ir_graph'] = ir_graph
         data['in_nodes'] = self.in_nodes
         data['out_nodes'] = self.out_nodes
         data['attrs'] = self._attrs
@@ -250,90 +229,71 @@ class Graph(object):
     def deserialize(self, s):
         data = pickle.loads(s)
         self.program = data['program']
+        self.ir_graph = data['ir_graph']
         self.in_nodes = data['in_nodes']
         self.out_nodes = data['out_nodes']
         self._attrs = data['attrs']
 
     def get_optimize_graph(self, optimizer, place):
-        graph = self.clone()
+        """
+        Append backward operators and optimize operators to graph.
+        """
+        main_program = self.ir_graph.to_program()
         startup_program = Program()
         with program_guard(
-                main_program=graph.program, startup_program=startup_program):
+                main_program=main_program, startup_program=startup_program):
             target_name = None
             if 'loss' in graph.out_nodes:
                 target_name = graph.out_nodes['loss']
             elif 'cost' in graph.out_nodes:
                 target_name = graph.out_nodes['cost']
-            target = graph.get_var(target_name)
+            target = main_program.global_block().var(target_name)
             optimizer.minimize(target)
 
         exe = Executor(place)
         exe.run(program=startup_program, scope=self.scope)
+
+        graph = Graph(
+            main_program,
+            self.scope,
+            in_nodes=self.in_nodes,
+            out_nodes=self.out_nodes,
+            place=self.place,
+            for_test=False)
         return graph
 
+    @property
+    def program(self):
+        return self.program
 
-class IRGraph(Graph):
-    pass
+    def save_persistables(self, path, exe):
+        with scope_guard(self.scope):
+            io.save_persistables(exe.exe, path, main_program=self.program)
 
+    def load_persistables(self, path, exe):
+        def if_exist(var):
+            return os.path.exists(os.path.join(path, var.name))
 
-def save_persistables(graph, path, exe):
-    io.save_persistables(exe.exe, path, main_program=graph.program)
+        io.load_vars(
+            exe.exe, path, main_program=self.program, predicate=if_exist)
+        self.update_param_shape()
+        self.update_groups_of_conv()
 
+    def update_param_shape(self):
+        for param in self.all_parameters():
+            tensor_shape = np.array(
+                self.scope.find_var(param.name).get_tensor()).shape
+            param.desc.set_shape(tensor_shape)
 
-def load_persistables(graph, path, exe):
-    def if_exist(var):
-        return os.path.exists(os.path.join(path, var.name))
+    def infer_shape(self):
+        for op in self.all_ops():
+            if op.type != 'conditional_block':
+                op.infer_shape()
 
-    io.load_vars(exe.exe, path, main_program=graph.program, predicate=if_exist)
-    update_param_shape(graph)
-    update_depthwise_conv(graph)
-
-
-def update_param_shape(graph):
-    for param in graph.all_parameters():
-        tensor_shape = np.array(graph.scope.find_var(param.name).get_tensor(
-        )).shape
-        param.desc.set_shape(tensor_shape)
-
-
-def infer_shape(graph):
-    for op in graph.all_ops():
-        if op.type != 'conditional_block':
-            op.desc.infer_shape(op.block.desc)
-
-
-def update_depthwise_conv(graph):
-    for op in graph.all_ops():
-        if op.type == 'depthwise_conv2d':
-            op.desc._set_attr('groups',
-                              graph.get_var(op.input('Filter')[0]).shape[0])
-
-
-def save_inference_graph_model(dirname,
-                               feeded_var_names,
-                               target_var_names,
-                               place,
-                               graph=None,
-                               model_filename=None,
-                               params_filename=None,
-                               export_for_deployment=True):
-    target_vars = None
-    if target_var_names:
-        target_vars = [graph.var(name) for name in target_var_names]
-    exe = Executor(place)
-    save_inference_model(dirname, feeded_var_names, target_vars, exe,
-                         graph.program, model_filename, params_filename,
-                         export_for_deployment)
-
-
-def load_inference_graph_model(dirname,
-                               place,
-                               model_filename=None,
-                               params_filename=None,
-                               pserver_endpoints=None):
-    exe = Executor(place)
-    return load_inference_model(dirname, exe, model_filename, params_filename,
-                                pserver_endpoints)
+    def update_groups_of_conv(self):
+        for op in self.all_ops():
+            if op.type == 'depthwise_conv2d':
+                op.set_attr('groups', op.vars_of_input('Filter')[0].shape[0])
 
 
 def _count_shape_params_flops(b_vars, one_op):
@@ -348,9 +308,9 @@ def _count_shape_params_flops(b_vars, one_op):
         FLOPs: : one operator's FLOPs
     '''
     if one_op.type in ['conv2d', 'depthwise_conv2d']:
-        k_arg_shape = b_vars[one_op.input("Filter")[0]].shape
-        in_data_shape = b_vars[one_op.input("Input")[0]].shape
-        out_data_shape = b_vars[one_op.output("Output")[0]].shape
+        k_arg_shape = b_vars[one_op.var_names_of_input("Filter")[0]].shape
+        in_data_shape = b_vars[one_op.var_names_of_input("Input")[0]].shape
+        out_data_shape = b_vars[one_op.var_names_of_output("Output")[0]].shape
         c_out, c_in, k_h, k_w = k_arg_shape
         _, c_out_, data_h, data_w = out_data_shape
         #        assert c_out == c_out_, 'shape error!'
@@ -363,21 +323,21 @@ def _count_shape_params_flops(b_vars, one_op):
         FLOPs = 2 * data_h * data_w * c_out * (kernel_ops + bias_ops)
 
     elif one_op.type == 'pool2d':
-        in_data_shape = b_vars[one_op.input("X")[0]].shape
-        out_data_shape = b_vars[one_op.output("Out")[0]].shape
+        in_data_shape = b_vars[one_op.var_names_of_input("X")[0]].shape
+        out_data_shape = b_vars[one_op.var_names_of_output("Out")[0]].shape
         _, c_out, data_h, data_w = out_data_shape
         k_size = one_op.attr("ksize")
         PARAMs = 0
         FLOPs = data_h * data_w * c_out * (k_size[0]**2)
 
     elif one_op.type == 'mul':
-        k_arg_shape = b_vars[one_op.input("Y")[0]].shape
-        in_data_shape = b_vars[one_op.input("X")[0]].shape
-        out_data_shape = b_vars[one_op.output("Out")[0]].shape
+        k_arg_shape = b_vars[one_op.var_names_of_input("Y")[0]].shape
+        in_data_shape = b_vars[one_op.var_names_of_input("X")[0]].shape
+        out_data_shape = b_vars[one_op.var_names_of_output("Out")[0]].shape
         # TODO: fc has mul ops
         # add attr to mul op, tell us whether it belongs to 'fc'
         # this's not the best way
-        if 'fc' not in one_op.output("Out")[0]:
+        if 'fc' not in one_op.var_names_of_output("Out")[0]:
             return None
         k_in, k_out = k_arg_shape
         # bias in sum op
@@ -385,15 +345,15 @@ def _count_shape_params_flops(b_vars, one_op):
         FLOPs = k_in * k_out
 
     elif one_op.type in ['relu', 'sigmoid']:
-        in_data_shape = b_vars[one_op.input("X")[0]].shape
-        out_data_shape = b_vars[one_op.output("Out")[0]].shape
+        in_data_shape = b_vars[one_op.var_nams_of_input("X")[0]].shape
+        out_data_shape = b_vars[one_op.var_names_of_output("Out")[0]].shape
         _, c_in, data_h, data_w = in_data_shape
         PARAMs = 0
         FLOPs = data_h * data_w * c_in
 
     elif one_op.type == 'batch_norm':
-        in_data_shape = b_vars[one_op.input("X")[0]].shape
-        out_data_shape = b_vars[one_op.output("Y")[0]].shape
+        in_data_shape = b_vars[one_op.var_names_of_input("X")[0]].shape
+        out_data_shape = b_vars[one_op.var_names_of_output("Y")[0]].shape
         _, c_in, data_h, data_w = in_data_shape
         # gamma, beta, mean, std
         PARAMs = c_in * 4
