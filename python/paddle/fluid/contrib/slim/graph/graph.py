@@ -15,14 +15,19 @@
 import collections
 from collections import OrderedDict
 from .... import io
+from .... import core
+from .... import compiler
+from ....data_feeder import DataFeeder
 from ....framework import Program
+from ....framework import IrGraph
+from ....framework import IrVarNode
+from ....framework import IrOpNode
 from ....framework import program_guard
 from ....framework import Parameter
 from ....framework import Variable
 from ....executor import Executor
 import copy
 from collections import Iterable
-from ....io import save_inference_model, load_inference_model, save_persistables
 import numpy as np
 import pickle
 import os
@@ -35,8 +40,12 @@ __all__ = [
 
 
 class Var(object):
-    def __init__(ir_var_node):
+    def __init__(self, ir_var_node, ir_graph):
+        assert isinstance(
+            ir_var_node,
+            IrVarNode), 'ir_var_node must be the instance of IrVarNode'
         self.ir_var_node = ir_var_node
+        self.ir_graph = ir_graph
 
     @property
     def name(self):
@@ -51,11 +60,13 @@ class Var(object):
 
     @property
     def input_ops(self):
-        return [Op(in_op) for in_op in self.ir_var_node.inputs]
+        return [Op(in_op, self.ir_graph) for in_op in self.ir_var_node.inputs]
 
     @property
     def output_ops(self):
-        return [Op(out_op) for out_op in self.ir_var_node.outputs]
+        return [
+            Op(out_op, self.ir_graph) for out_op in self.ir_var_node.outputs
+        ]
 
 
 class Param(Var):
@@ -76,8 +87,11 @@ OPTIMIZER_OPS = [
 
 
 class Op(object):
-    def __init__(self, ir_op_node):
+    def __init__(self, ir_op_node, ir_graph):
+        assert isinstance(
+            ir_op_node, IrOpNode), 'ir_op_node must be the instance of IrOpNode'
         self.ir_op_node = ir_op_node
+        self.ir_graph = ir_graph
 
     @property
     def input_var_names(self):
@@ -89,11 +103,17 @@ class Op(object):
 
     @property
     def input_vars(self):
-        return [Var(in_ir_var) for in_ir_var in self.ir_op_node.inputs]
+        return [
+            Var(in_ir_var, self.ir_graph)
+            for in_ir_var in self.ir_op_node.inputs
+        ]
 
     @property
     def output_vars(self):
-        return [Var(out_ir_var) for out_ir_var in self.ir_op_node.outputs]
+        return [
+            Var(out_ir_var, self.ir_graph)
+            for out_ir_var in self.ir_op_node.outputs
+        ]
 
     @property
     def idx(self):
@@ -113,10 +133,13 @@ class Op(object):
         return op.type in OPTIMIZER_OPS
 
     def vars_of_input(self, input_name):
-        return [Var(in_var) for in_var in self.ir_op_node.input(input_name)]
+        return [
+            Var(self.ir_graph.var_node(in_var), self.ir_graph)
+            for in_var in self.ir_op_node.input(input_name)
+        ]
 
     def var_names_of_input(self, input_name):
-        return [in_var.name for in_var in self.vars_of_input(input_name)]
+        return self.ir_op_node.input(input_name)
 
     def set_attr(self, key, value):
         self.ir_op_node.set_attr(key, value)
@@ -131,28 +154,42 @@ class Graph(object):
                  place=None,
                  for_test=False):
         super(Graph, self).__init__()
-        self.program = Program() if program is None else program
+        self.for_test = for_test
+        self._program = Program() if program is None else program
         self.param_names = []
         for block in program.blocks:
             self.param_names += [param.name for param in block.all_parameters()]
         self.param_names = set(self.param_names)
 
-        self.data_feeder = DataFeeder(
-            feed_list=in_nodes.values, place, program=program)
-        self.ir_graph = IrGraph(core.Graph(program.desc), for_test=for_test)
+        self._data_feeder = DataFeeder(
+            in_nodes.values(), place, program=program)
+        if for_test:
+            self.ir_graph = IrGraph(core.Graph(program.desc), for_test=for_test)
+        else:
+            self.ir_graph = None
         self.compiled_graph = None
-        self.scope = scope
+        self._scope = scope
         self.in_nodes = in_nodes
         self.out_nodes = out_nodes
         self._attrs = collections.OrderedDict()
 
+    @property
+    def data_feeder(self):
+        return self._data_feeder
+
     def re_compile(self, for_parallel=True):
+
+        if self.for_test:
+            program = self.ir_graph.graph
+            loss = None
+        else:
+            program = self.program
+            loss = self.out_nodes['loss']
         if for_parallel:
             self.compiled_graph = compiler.CompiledProgram(
-                self.ir_graph).with_data_parallel(
-                    loss_name=self.out_nodes['loss'])
+                program).with_data_parallel(loss_name=loss)
         else:
-            self.compiled_graph = compiler.CompiledProgram(self.ir_graph)
+            self.compiled_graph = compiler.CompiledProgram(program)
 
     def has(self, attr_name):
         return attr_name in self._attrs
@@ -172,21 +209,26 @@ class Graph(object):
                 attr_name))
 
     def all_parameters(self):
-        return [self.var(param_name) for param_name in param_names]
+        return [self.var(param_name) for param_name in self.param_names]
 
     def all_vars(self):
-        return [Var(var) for var in self.ir_graph.all_var_nodes()]
+        return [
+            Var(var, self.ir_graph) for var in self.ir_graph.all_var_nodes()
+        ]
 
     @property
     def scope(self):
-        return self.scope
+        return self._scope
 
     @property
     def ops(self):
-        return [Op(op_node) for op_node in self.ir_graph.all_op_nodes()]
+        return [
+            Op(op_node, self.ir_graph)
+            for op_node in self.ir_graph.all_op_nodes()
+        ]
 
     def var(self, name):
-        return Var(self.ir_graph.var_node(name))
+        return Var(self.ir_graph.var_node(name), self.ir_graph)
 
     def clone(self):
         # TODO(wanghaoshuang@baidu.com): use clone function of IrGraph
@@ -248,7 +290,7 @@ class Graph(object):
 
     def deserialize(self, s):
         data = pickle.loads(s)
-        self.program = data['program']
+        self._program = data['program']
         self.ir_graph = data['ir_graph']
         self.in_nodes = data['in_nodes']
         self.out_nodes = data['out_nodes']
@@ -259,32 +301,35 @@ class Graph(object):
         Append backward operators and optimize operators to graph.
         """
         main_program = self.ir_graph.to_program()
-        startup_program = Program()
-        with program_guard(
-                main_program=main_program, startup_program=startup_program):
-            target_name = None
-            if 'loss' in graph.out_nodes:
-                target_name = graph.out_nodes['loss']
-            elif 'cost' in graph.out_nodes:
-                target_name = graph.out_nodes['cost']
-            target = main_program.global_block().var(target_name)
-            optimizer.minimize(target)
-
-        exe = Executor(place)
-        exe.run(program=startup_program, scope=self.scope)
+        print("get_optimize_graph")
 
         graph = Graph(
             main_program,
             self.scope,
             in_nodes=self.in_nodes,
             out_nodes=self.out_nodes,
-            place=self.place,
+            place=place,
             for_test=False)
+
+        startup_program = Program()
+        with program_guard(
+                main_program=main_program, startup_program=startup_program):
+            target_name = None
+            if 'loss' in self.out_nodes:
+                target_name = self.out_nodes['loss']
+            elif 'cost' in self.out_nodes:
+                target_name = self.out_nodes['cost']
+            target = main_program.global_block().var(target_name)
+            optimizer.minimize(target)
+
+        exe = Executor(place)
+        exe.run(program=startup_program, scope=self.scope)
+
         return graph
 
     @property
     def program(self):
-        return self.program
+        return self._program
 
     def save_persistables(self, path, exe):
         with scope_guard(self.scope):
@@ -300,20 +345,42 @@ class Graph(object):
         self.update_groups_of_conv()
 
     def update_param_shape(self):
-        for param in self.all_parameters():
-            tensor_shape = np.array(
-                self.scope.find_var(param.name).get_tensor()).shape
-            param.desc.set_shape(tensor_shape)
+        if self.ir_graph is not None:
+            for param in self.all_parameters():
+                tensor_shape = np.array(
+                    self.scope.find_var(param.name()).get_tensor()).shape
+                param.set_shape(tensor_shape)
+        # program is used while this graph is for training.
+        if not self.for_test:
+            for param in self.program.global_block().all_parameters():
+                tensor_shape = np.array(
+                    self.scope.find_var(param.name).get_tensor()).shape
+                param.desc.set_shape(tensor_shape)
 
     def infer_shape(self):
-        for op in self.ops:
-            if op.type != 'conditional_block':
-                op.infer_shape()
+        if self.ir_graph is not None:
+            for op in self.ops:
+                if op.type != 'conditional_block':
+                    op.infer_shape()
+        # program is used while this graph is for training.
+        if not self.for_test:
+            for op in self.program.global_block().ops:
+                if op.type != 'conditional_block':
+                    op.desc.infer_shape()
 
     def update_groups_of_conv(self):
-        for op in self.ops:
-            if op.type == 'depthwise_conv2d':
-                op.set_attr('groups', op.vars_of_input('Filter')[0].shape[0])
+        if self.ir_graph is not None:
+            for op in self.ops:
+                if op.type == 'depthwise_conv2d':
+                    op.set_attr('groups',
+                                op.vars_of_input('Filter')[0].shape()[0])
+        # program is used while this graph is for training.
+        if not self.for_test:
+            for op in self.program.global_block().ops:
+                if op.type == 'depthwise_conv2d':
+                    op.desc._set_attr('groups',
+                                      self.program.global_block().var(
+                                          op.input('Filter')[0]).shape[0])
 
 
 def _count_shape_params_flops(b_vars, one_op):

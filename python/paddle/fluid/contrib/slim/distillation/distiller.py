@@ -53,6 +53,7 @@ class L2DistillerPass(object):
 
     def apply(self, graph):
         ret_graph = graph
+
         with program_guard(ret_graph.program):
 
             student_feature_map = ret_graph.get_var(self.student_feature_map)

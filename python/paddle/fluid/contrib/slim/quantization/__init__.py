@@ -13,13 +13,10 @@
 # limitations under the License.
 
 from __future__ import print_function
-from . import quantizer
-from .quantizer import *
 from . import quantization_strategy
 from .quantization_strategy import *
 from . import quantization_pass
 from .quantization_pass import *
 
 __all__ = quantization_pass.__all__
-__all__ = quantizer.__all__
 __all__ += quantization_strategy.__all__

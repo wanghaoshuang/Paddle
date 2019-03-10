@@ -58,17 +58,12 @@ class DistillationStrategy(Strategy):
         graph.out_nodes['student_loss'] = graph.out_nodes['loss']
         for distiller in self.distillers:
             graph = distiller.distiller_loss(graph)
-        startup_program = Program()
-        with program_guard(graph.program, startup_program):
-            context.distiller_optimizer._name = 'distillation_optimizer'
-            context.distiller_optimizer.minimize(
-                graph.get_var(graph.out_nodes['loss']))
-        exe = Executor(context.place)
-        exe.run(startup_program, scope=graph.scope)
 
         context.put('distillation_backup_optimize_graph',
                     context.optimize_graph)
-        context.optimize_graph = graph
+        context.distiller_optimizer._name = 'distillation_optimizer'
+        context.optimize_graph = graph.get_optimize_graph(
+            context.distiller_optimizer, context.place)
 
     def on_epoch_end(self, context):
         if context.epoch_id == (self.end_epoch - 1):

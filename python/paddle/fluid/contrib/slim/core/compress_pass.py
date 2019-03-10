@@ -108,9 +108,6 @@ class Context(object):
         data = {}
         data['epoch_id'] = self.epoch_id
         data['eval_results'] = self.eval_results
-        #        data['eval_graph'] = self.eval_graph.serialize()
-        #        data['train_graph'] = self.train_graph.serialize()
-        #        data['optimize_graph'] = self.optimize_graph.serialize()
         with open(file_name, 'wb') as context_file:
             pickle.dump(data, context_file)
 
@@ -119,10 +116,6 @@ class Context(object):
             data = pickle.load(context_file)
             self.epoch_id = data['epoch_id']
             self.eval_results = data['eval_results']
-
-#            self.eval_graph.deserialize(data['eval_graph'])
-#            self.train_graph.deserialize(data['train_graph'])
-#            self.optimize_graph.deserialize(data['optimize_graph'])
 
     def eval_converged(self, metric_name, delta=0.001):
         if (metric_name not in self.eval_results
@@ -136,7 +129,8 @@ class Context(object):
         logger.info('Running evaluation')
         assert self.eval_graph is not None
         assert self.eval_reader is not None
-        eval_graph = self.eval_graph.clone(for_test=True)
+        eval_graph = self.eval_graph
+        eval_graph.re_compile()
         executor = get_executor(eval_graph, self.place)
         results = []
         batch_id = 0
@@ -191,12 +185,15 @@ class CompressPass(object):
         self.strategies = []
         self.epoch = 0
         self.place = CPUPlace() if place is None else place
+        logger.info('self.train_graph = Graph')
         self.train_graph = Graph(
             train_program,
             scope,
             in_nodes=train_feed_list,
             out_nodes=train_fetch_list,
-            place=self.place)
+            place=self.place,
+            for_test=True)  # means have no bwd ops
+        logger.info('elf.eval_graph = Graph')
         self.eval_graph = Graph(
             eval_program,
             scope,
@@ -204,6 +201,7 @@ class CompressPass(object):
             out_nodes=eval_fetch_list,
             place=self.place,
             for_test=True)
+        logger.info('after elf.eval_graph = Graph')
         self.train_reader = train_reader
         self.eval_reader = eval_reader
         self.teacher_graphs = []
@@ -250,7 +248,7 @@ class CompressPass(object):
             logger.info("Init model from: {}".format(self.init_model))
 
     def _load_checkpoint(self, context):
-        logger.debug('_load_checkpoint')
+        logger.info('_load_checkpoint')
         strategies = self.strategies
         if self.checkpoint_path:
             checkpoints = [
@@ -276,9 +274,9 @@ class CompressPass(object):
 
                 if os.path.exists(model_path):
                     exe = get_executor(context.optimize_graph, context.place)
-                    load_persistables(context.optimize_graph, model_path, exe)
-                    update_param_shape(context.eval_graph)
-                    update_depthwise_conv(context.eval_graph)
+                    context.optimize_graph.load_persistables(model_path, exe)
+                    context.eval_graph.update_param_shape()
+                    context.eval_graph.update_groups_of_conv()
                     logger.info("Loaded params from: {}".format(model_path))
         return context, strategies
 
@@ -357,13 +355,14 @@ class CompressPass(object):
                     context.train_optimizer, context.place)
             else:
                 context.optimize_graph = context.train_graph
-
+        logger.info('self._load_checkpoint')
         context, self.strategies = self._load_checkpoint(context)
+        logger.info('after self._load_checkpoint')
 
         for strategy in self.strategies:
             strategy.on_compression_begin(context)
         start = context.epoch_id
-        self._eval(context)
+        #        self._eval(context)
         for epoch in range(start, self.epoch):
             context.epoch_id = epoch
             for strategy in self.strategies:

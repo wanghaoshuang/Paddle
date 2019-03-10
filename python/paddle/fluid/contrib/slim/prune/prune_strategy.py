@@ -78,17 +78,18 @@ class PruneStrategy(Strategy):
                 np.array(param_t), pruned_idx, pruned_axis=0, lazy=lazy)
             if not only_graph:
                 param_t.set(pruned_param, place)
-            ori_shape = param.shape
+            ori_shape = param.shape()
             if param.name not in self.param_shape_backup:
-                self.param_shape_backup[param.name] = copy.deepcopy(param.shape)
-            new_shape = list(param.shape)
-            new_shape[0] = pruned_param.shape[0]
+                self.param_shape_backup[param.name] = copy.deepcopy(param.shape(
+                ))
+            new_shape = list(param.shape())
+            new_shape[0] = pruned_param.shape()[0]
             param.set_shape(new_shape)
             logger.debug(
                 '|----------------------------------------+----+------------------------------+------------------------------|'
             )
             logger.debug('|{:^40}|{:^4}|{:^30}|{:^30}|'.format(
-                param.name, 0, ori_shape, param.shape))
+                param.name, 0, ori_shape, param.shape()))
             self.pruned_list[0].append(param.name)
         return pruned_idx
 
@@ -110,17 +111,18 @@ class PruneStrategy(Strategy):
                 np.array(param_t), pruned_idx, pruned_axis, lazy=lazy)
             if not only_graph:
                 param_t.set(pruned_param, place)
-            ori_shape = param.shape
+            ori_shape = param.shape()
             if param.name not in self.param_shape_backup:
-                self.param_shape_backup[param.name] = copy.deepcopy(param.shape)
-            new_shape = list(param.shape)
-            new_shape[pruned_axis] = pruned_param.shape[pruned_axis]
+                self.param_shape_backup[param.name] = copy.deepcopy(param.shape(
+                ))
+            new_shape = list(param.shape())
+            new_shape[pruned_axis] = pruned_param.shape()[pruned_axis]
             param.set_shape(new_shape)
             logger.debug(
                 '|----------------------------------------+----+------------------------------+------------------------------|'
             )
             logger.debug('|{:^40}|{:^4}|{:^30}|{:^30}|'.format(
-                param.name, pruned_axis, ori_shape, param.shape))
+                param.name, pruned_axis, ori_shape, param.shape()))
             self.pruned_list[pruned_axis].append(param.name)
 
     def _forward_search_related_op(self, graph, param):
@@ -400,12 +402,12 @@ class PruneStrategy(Strategy):
         for param in target_graph.all_parameters():
             var = graph.var(param.name)
             ori_shape = var.shape
-            var.set_shape(param.shape)
+            var.set_shape(param.shape())
             logger.debug(
                 '|----+----------------------------------------+------------------------------+------------------------------|'
             )
             logger.debug('|{:^4}|{:^40}|{:^30}|{:^30}|'.format(
-                count, param.name, ori_shape, param.shape))
+                count, param.name, ori_shape, param.shape()))
             count += 1
         logger.debug(
             '|----+----------------------------------------+------------------------------+------------------------------|'
@@ -576,13 +578,13 @@ class SensitivePruneStrategy(PruneStrategy):
         sensitivities = self._load_sensitivities(sensitivities_file)
 
         for param in context.eval_graph.all_parameters():
-            if not re.match(self.pruned_params, param.name):
+            if not re.match(self.pruned_params, param.name()):
                 continue
             if param.name not in sensitivities:
                 sensitivities[param.name] = {
                     'pruned_percent': [],
                     'loss': [],
-                    'size': param.shape[0]
+                    'size': param.shape()[0]
                 }
 
         metric = None
