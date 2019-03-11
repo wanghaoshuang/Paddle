@@ -19,8 +19,14 @@ from ....compiler import CompiledProgram
 from .... import parallel_executor
 from ....data_feeder import DataFeeder
 from .graph import Graph
+import sys
+import logging
 
 __all__ = ['get_executor']
+
+FORMAT = '%(asctime)s-%(levelname)s: %(message)s'
+logging.basicConfig(level=logging.INFO, format=FORMAT, stream=sys.stdout)
+logger = logging.getLogger(__name__)
 
 
 class GraphExecutor(object):
@@ -50,6 +56,7 @@ class CompiledGraphExecutor(GraphExecutor):
 
         fetch_list = fetches if fetches else graph.out_nodes.values()
         program = graph.compiled_graph if graph.compiled_graph else graph.program
+
         results = self.exe.run(program,
                                scope=graph.scope,
                                fetch_list=fetch_list,

@@ -185,15 +185,13 @@ class CompressPass(object):
         self.strategies = []
         self.epoch = 0
         self.place = CPUPlace() if place is None else place
-        logger.info('self.train_graph = Graph')
         self.train_graph = Graph(
             train_program,
             scope,
             in_nodes=train_feed_list,
             out_nodes=train_fetch_list,
             place=self.place,
-            for_test=True)  # means have no bwd ops
-        logger.info('elf.eval_graph = Graph')
+            for_test=False)
         self.eval_graph = Graph(
             eval_program,
             scope,
@@ -201,7 +199,6 @@ class CompressPass(object):
             out_nodes=eval_fetch_list,
             place=self.place,
             for_test=True)
-        logger.info('after elf.eval_graph = Graph')
         self.train_reader = train_reader
         self.eval_reader = eval_reader
         self.teacher_graphs = []
@@ -290,19 +287,13 @@ class CompressPass(object):
             if not os.path.isdir(model_path):
                 os.makedirs(model_path)
             exe = get_executor(context.optimize_graph, context.place)
-            save_persistables(context.optimize_graph, model_path, exe)
+            context.optimize_graph.save_persistables(model_path, exe)
             context.to_file(context_path)
             with open(strategy_path, 'wb') as strategy_file:
                 pickle.dump(self.strategies, strategy_file)
             logger.info('Saved checkpoint to: {}'.format(checkpoint_path))
 
     def _train_one_epoch(self, context):
-        current_lr = np.array(
-            context.optimize_graph.scope.find_var('learning_rate').get_tensor(
-            ))[0]
-        logger.info(
-            '-----------------------Training epoch-{}; current lr: {:.5f}-----------------------'.
-            format(context.epoch_id, current_lr))
 
         executor = get_executor(context.optimize_graph, self.place)
 
@@ -310,7 +301,6 @@ class CompressPass(object):
                                  context.optimize_graph.data_feeder)
 
         context.optimize_graph.re_compile()
-
         for feed in feed_reader():
             for strategy in self.strategies:
                 strategy.on_batch_begin(context)
@@ -355,9 +345,8 @@ class CompressPass(object):
                     context.train_optimizer, context.place)
             else:
                 context.optimize_graph = context.train_graph
-        logger.info('self._load_checkpoint')
+
         context, self.strategies = self._load_checkpoint(context)
-        logger.info('after self._load_checkpoint')
 
         for strategy in self.strategies:
             strategy.on_compression_begin(context)

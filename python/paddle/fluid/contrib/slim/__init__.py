@@ -19,7 +19,6 @@ from .distillation import *
 __all__ = [
     'build_compressor',
     'CompressPass',
-    'ImitationGraph',
     'SensitivePruneStrategy',
     'MagnitudePruner',
     'RatioPruner',

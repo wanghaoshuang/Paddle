@@ -26,17 +26,24 @@ from ....framework import program_guard
 from ....framework import Parameter
 from ....framework import Variable
 from ....executor import Executor
+from ....executor import scope_guard
 import copy
 from collections import Iterable
 import numpy as np
 import pickle
 import os
+import logging
+import sys
 
 __all__ = [
     'Var',
     'Op',
     'Graph',
 ]
+
+FORMAT = '%(asctime)s-%(levelname)s: %(message)s'
+logging.basicConfig(level=logging.INFO, format=FORMAT, stream=sys.stdout)
+logger = logging.getLogger(__name__)
 
 
 class Var(object):
@@ -95,11 +102,11 @@ class Op(object):
 
     @property
     def input_var_names(self):
-        return [in_var.name for in_var in self.input_vars()]
+        return [in_var.name() for in_var in self.input_vars]
 
     @property
     def output_var_names(self):
-        return [out_var.name for out_var in self.output_vars()]
+        return [out_var.name() for out_var in self.output_vars]
 
     @property
     def input_vars(self):
@@ -130,7 +137,7 @@ class Op(object):
         return self.type.endswith('_grad')
 
     def is_opt_op(self):
-        return op.type in OPTIMIZER_OPS
+        return self.type in OPTIMIZER_OPS
 
     def vars_of_input(self, input_name):
         return [
@@ -141,8 +148,14 @@ class Op(object):
     def var_names_of_input(self, input_name):
         return self.ir_op_node.input(input_name)
 
+    def var_names_of_output(self, output_name):
+        return self.ir_op_node.output(output_name)
+
     def set_attr(self, key, value):
         self.ir_op_node.set_attr(key, value)
+
+    def attr(self, key):
+        return self.ir_op_node.node.op().attr(key)
 
 
 class Graph(object):
@@ -155,7 +168,7 @@ class Graph(object):
                  for_test=False):
         super(Graph, self).__init__()
         self.for_test = for_test
-        self._program = Program() if program is None else program
+        self.program = Program() if program is None else program
         self.param_names = []
         for block in program.blocks:
             self.param_names += [param.name for param in block.all_parameters()]
@@ -163,33 +176,35 @@ class Graph(object):
 
         self._data_feeder = DataFeeder(
             in_nodes.values(), place, program=program)
-        if for_test:
-            self.ir_graph = IrGraph(core.Graph(program.desc), for_test=for_test)
-        else:
-            self.ir_graph = None
+        self.ir_graph = IrGraph(core.Graph(program.desc), for_test=for_test)
         self.compiled_graph = None
         self._scope = scope
         self.in_nodes = in_nodes
         self.out_nodes = out_nodes
         self._attrs = collections.OrderedDict()
 
+    def is_parameter(self, var):
+        b = var.name() in self.param_names
+        if var.name() == 'fc7_weights' and not b:
+            logger.info('{} is param: {}'.format(var.name(), b))
+            logger.info(self.param_names)
+        return b
+
     @property
     def data_feeder(self):
         return self._data_feeder
 
     def re_compile(self, for_parallel=True):
-
+        target = self.ir_graph.clone().graph
         if self.for_test:
-            program = self.ir_graph.graph
             loss = None
         else:
-            program = self.program
             loss = self.out_nodes['loss']
         if for_parallel:
             self.compiled_graph = compiler.CompiledProgram(
-                program).with_data_parallel(loss_name=loss)
+                target).with_data_parallel(loss_name=loss)
         else:
-            self.compiled_graph = compiler.CompiledProgram(program)
+            self.compiled_graph = compiler.CompiledProgram(target)
 
     def has(self, attr_name):
         return attr_name in self._attrs
@@ -247,6 +262,7 @@ class Graph(object):
         for in_var in op.input_vars:
             for in_op in in_var.input_ops:
                 ops.append(in_op)
+        return ops
 
     def next_ops(self, op):
         ops = []
@@ -258,7 +274,7 @@ class Graph(object):
     def get_param_by_op(self, op):
         params = []
         for in_var in op.input_vars:
-            if in_var.name in self.param_names:
+            if in_var.name() in self.param_names:
                 params.append(in_var)
         return params
 
@@ -266,7 +282,7 @@ class Graph(object):
         ret = 0
         b_vars = {}
         for var in self.all_vars():
-            b_vars[var.name] = var
+            b_vars[var.name()] = var
         for op in self.ops:
             if op.type in ['conv2d', 'depthwise_conv2d', 'mul']:
                 _, _, _, flop = _count_shape_params_flops(b_vars, op)
@@ -276,7 +292,7 @@ class Graph(object):
     def numel_params(self):
         ret = 0
         for param in self.all_parameters():
-            ret += np.product(param.shape)
+            ret += np.product(param.shape())
         return ret
 
     def serialize(self):
@@ -290,7 +306,7 @@ class Graph(object):
 
     def deserialize(self, s):
         data = pickle.loads(s)
-        self._program = data['program']
+        self.program = data['program']
         self.ir_graph = data['ir_graph']
         self.in_nodes = data['in_nodes']
         self.out_nodes = data['out_nodes']
@@ -301,16 +317,6 @@ class Graph(object):
         Append backward operators and optimize operators to graph.
         """
         main_program = self.ir_graph.to_program()
-        print("get_optimize_graph")
-
-        graph = Graph(
-            main_program,
-            self.scope,
-            in_nodes=self.in_nodes,
-            out_nodes=self.out_nodes,
-            place=place,
-            for_test=False)
-
         startup_program = Program()
         with program_guard(
                 main_program=main_program, startup_program=startup_program):
@@ -321,15 +327,17 @@ class Graph(object):
                 target_name = self.out_nodes['cost']
             target = main_program.global_block().var(target_name)
             optimizer.minimize(target)
-
         exe = Executor(place)
         exe.run(program=startup_program, scope=self.scope)
-
+        graph = Graph(
+            main_program,
+            self.scope,
+            in_nodes=self.in_nodes,
+            out_nodes=self.out_nodes,
+            place=place,
+            for_test=False)
+        graph.param_names = self.param_names
         return graph
-
-    @property
-    def program(self):
-        return self._program
 
     def save_persistables(self, path, exe):
         with scope_guard(self.scope):
@@ -395,9 +403,9 @@ def _count_shape_params_flops(b_vars, one_op):
         FLOPs: : one operator's FLOPs
     '''
     if one_op.type in ['conv2d', 'depthwise_conv2d']:
-        k_arg_shape = b_vars[one_op.var_names_of_input("Filter")[0]].shape
-        in_data_shape = b_vars[one_op.var_names_of_input("Input")[0]].shape
-        out_data_shape = b_vars[one_op.var_names_of_output("Output")[0]].shape
+        k_arg_shape = b_vars[one_op.var_names_of_input("Filter")[0]].shape()
+        in_data_shape = b_vars[one_op.var_names_of_input("Input")[0]].shape()
+        out_data_shape = b_vars[one_op.var_names_of_output("Output")[0]].shape()
         c_out, c_in, k_h, k_w = k_arg_shape
         _, c_out_, data_h, data_w = out_data_shape
         #        assert c_out == c_out_, 'shape error!'
@@ -410,17 +418,17 @@ def _count_shape_params_flops(b_vars, one_op):
         FLOPs = 2 * data_h * data_w * c_out * (kernel_ops + bias_ops)
 
     elif one_op.type == 'pool2d':
-        in_data_shape = b_vars[one_op.var_names_of_input("X")[0]].shape
-        out_data_shape = b_vars[one_op.var_names_of_output("Out")[0]].shape
+        in_data_shape = b_vars[one_op.var_names_of_input("X")[0]].shape()
+        out_data_shape = b_vars[one_op.var_names_of_output("Out")[0]].shape()
         _, c_out, data_h, data_w = out_data_shape
         k_size = one_op.attr("ksize")
         PARAMs = 0
         FLOPs = data_h * data_w * c_out * (k_size[0]**2)
 
     elif one_op.type == 'mul':
-        k_arg_shape = b_vars[one_op.var_names_of_input("Y")[0]].shape
-        in_data_shape = b_vars[one_op.var_names_of_input("X")[0]].shape
-        out_data_shape = b_vars[one_op.var_names_of_output("Out")[0]].shape
+        k_arg_shape = b_vars[one_op.var_names_of_input("Y")[0]].shape()
+        in_data_shape = b_vars[one_op.var_names_of_input("X")[0]].shape()
+        out_data_shape = b_vars[one_op.var_names_of_output("Out")[0]].shape()
         # TODO: fc has mul ops
         # add attr to mul op, tell us whether it belongs to 'fc'
         # this's not the best way
@@ -432,15 +440,15 @@ def _count_shape_params_flops(b_vars, one_op):
         FLOPs = k_in * k_out
 
     elif one_op.type in ['relu', 'sigmoid']:
-        in_data_shape = b_vars[one_op.var_nams_of_input("X")[0]].shape
-        out_data_shape = b_vars[one_op.var_names_of_output("Out")[0]].shape
+        in_data_shape = b_vars[one_op.var_nams_of_input("X")[0]].shape()
+        out_data_shape = b_vars[one_op.var_names_of_output("Out")[0]].shape()
         _, c_in, data_h, data_w = in_data_shape
         PARAMs = 0
         FLOPs = data_h * data_w * c_in
 
     elif one_op.type == 'batch_norm':
-        in_data_shape = b_vars[one_op.var_names_of_input("X")[0]].shape
-        out_data_shape = b_vars[one_op.var_names_of_output("Y")[0]].shape
+        in_data_shape = b_vars[one_op.var_names_of_input("X")[0]].shape()
+        out_data_shape = b_vars[one_op.var_names_of_output("Y")[0]].shape()
         _, c_in, data_h, data_w = in_data_shape
         # gamma, beta, mean, std
         PARAMs = c_in * 4
