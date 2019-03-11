@@ -238,10 +238,12 @@ class CompressPass(object):
     def _init_model(self, context):
         if self.init_model and os.path.exists(self.init_model):
             exe = get_executor(context.train_graph, context.place)
-            load_persistables(context.train_graph, self.init_model, exe)
-            update_param_shape(context.eval_graph)
-            update_depthwise_conv(context.eval_graph)
-            infer_shape(context.train_graph)
+
+            context.train_graph.load_persistables(self.init_model, exe)
+            context.train_graph.infer_shape()
+
+            context.eval_graph.update_param_shape()
+            context.eval_graph.update_groups_of_conv()
             logger.info("Init model from: {}".format(self.init_model))
 
     def _load_checkpoint(self, context):
@@ -351,7 +353,7 @@ class CompressPass(object):
         for strategy in self.strategies:
             strategy.on_compression_begin(context)
         start = context.epoch_id
-        #        self._eval(context)
+        self._eval(context)
         for epoch in range(start, self.epoch):
             context.epoch_id = epoch
             for strategy in self.strategies:

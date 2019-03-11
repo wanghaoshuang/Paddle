@@ -367,14 +367,16 @@ class Graph(object):
 
     def infer_shape(self):
         if self.ir_graph is not None:
-            for op in self.ops:
-                if op.type != 'conditional_block':
-                    op.infer_shape()
-        # program is used while this graph is for training.
+            for node in self.ir_graph.topology_sort():
+                if node.is_op() and node.op().type() != 'conditional_block':
+                    print("infer: {}; id: {}".format(node.op().type(),
+                                                     node.id()))
+                    #node.op().infer_shape(node.op().block())
+                # program is used while this graph is for training.
         if not self.for_test:
             for op in self.program.global_block().ops:
                 if op.type != 'conditional_block':
-                    op.desc.infer_shape()
+                    op.desc.infer_shape(op.desc.block())
 
     def update_groups_of_conv(self):
         if self.ir_graph is not None:
