@@ -74,8 +74,10 @@ class QuantizationStrategy(Strategy):
             binary = CompiledProgram(train_graph.graph).with_data_parallel(
                 loss_name=context.optimize_graph.out_nodes['loss'])
 
-            context.optimize_graph.compiled_program = binary
+            context.optimize_graph.compiled_graph = binary
             context.eval_graph.program = test_graph.to_program()
+
+            #            context.run_eval_graph()
             context.put('quantization_test_graph_backup', test_graph)
             logger.info('Finish QuantizationStrategy::on_epoch_begin')
 

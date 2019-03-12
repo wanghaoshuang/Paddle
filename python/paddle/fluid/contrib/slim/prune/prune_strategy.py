@@ -15,7 +15,6 @@
 from ..core.strategy import Strategy
 from ....framework import Program, program_guard, Parameter
 from .... import layers
-from ..graph import get_executor
 import prettytable as pt
 import numpy as np
 from scipy.optimize import leastsq
@@ -128,23 +127,22 @@ class PruneStrategy(Strategy):
     def _forward_search_related_op(self, graph, param):
         visited = {}
         for op in graph.ops:
-            visited[op.idx] = False
+            visited[op.id()] = False
         stack = []
         for op in graph.ops:
-            if (not op.is_bwd_op()) and (param.name() in op.input_var_names):
+            if (not graph.is_bwd_op(op)) and (param in op.inputs):
                 stack.append(op)
 
         visit_path = []
         while len(stack) > 0:
             top_op = stack[len(stack) - 1]
-            if visited[top_op.idx] == False:
+            if visited[top_op.id()] == False:
                 visit_path.append(top_op)
-                visited[top_op.idx] = True
+                visited[top_op.id()] = True
             next_ops = None
-            if top_op.type == "conv2d" and (
-                    param.name() not in top_op.input_var_names):
+            if top_op.op().type() == "conv2d" and (param not in top_op.inputs):
                 next_ops = None
-            elif top_op.type == "mul":
+            elif top_op.op().type() == "mul":
                 next_ops = None
             else:
                 next_ops = self._get_next_unvisited_op(graph, visited, top_op)
@@ -157,15 +155,16 @@ class PruneStrategy(Strategy):
     def _get_next_unvisited_op(self, graph, visited, op):
         next_ops = []
         for next_op in graph.next_ops(op):
-            if visited[next_op.idx] == False and (not next_op.is_bwd_op()):
+            if visited[next_op.id()] == False and (
+                    not graph.is_bwd_op(next_op)):
                 next_ops.append(next_op)
         return next_ops if len(next_ops) > 0 else None
 
     def _get_accumulator(self, graph, param):
         params = []
-        for op in param.output_ops:
-            if op.is_opt_op():
-                for out_var in op.output_vars:
+        for op in param.outputs:
+            if graph.is_opt_op(op):
+                for out_var in op.outputs:
                     if out_var.persistable and out_var.name != param.name():
                         params.append(out_var)
         return params
@@ -204,8 +203,8 @@ class PruneStrategy(Strategy):
 
         for idx, op in enumerate(related_ops):
 
-            if op.type == "conv2d" and (param.name() not in op.input_var_names):
-                for in_var in op.input_vars:
+            if op.op().type() == "conv2d" and (param not in op.inputs):
+                for in_var in op.inputs:
                     if graph.is_parameter(in_var):
                         conv_param = in_var
                         self._prune_parameter_by_idx(
@@ -216,8 +215,8 @@ class PruneStrategy(Strategy):
                             place=place,
                             lazy=lazy,
                             only_graph=only_graph)
-            if op.type == "depthwise_conv2d":
-                for in_var in op.input_vars:
+            if op.op().type() == "depthwise_conv2d":
+                for in_var in op.inputs:
                     if graph.is_parameter(in_var):
                         conv_param = in_var
                         self._prune_parameter_by_idx(
@@ -228,9 +227,9 @@ class PruneStrategy(Strategy):
                             place=place,
                             lazy=lazy,
                             only_graph=only_graph)
-            elif op.type == "elementwise_add":
+            elif op.op().type() == "elementwise_add":
                 # pruning bias
-                for in_var in op.input_vars:
+                for in_var in op.inputs:
                     if graph.is_parameter(in_var):
                         bias_param = in_var
                         self._prune_parameter_by_idx(
@@ -241,10 +240,10 @@ class PruneStrategy(Strategy):
                             place=place,
                             lazy=lazy,
                             only_graph=only_graph)
-            elif op.type == "mul":  # pruning fc layer
+            elif op.op().type() == "mul":  # pruning fc layer
                 fc_input = None
                 fc_param = None
-                for in_var in op.input_vars:
+                for in_var in op.inputs:
                     print("in_var: {}".format(in_var.name()))
                     if graph.is_parameter(in_var):
                         fc_param = in_var
@@ -266,18 +265,18 @@ class PruneStrategy(Strategy):
                     lazy=lazy,
                     only_graph=only_graph)
 
-            elif op.type == "concat":
-                concat_inputs = op.input_var_names
+            elif op.op().type() == "concat":
+                concat_inputs = op.inputs
                 last_op = related_ops[idx - 1]
-                for out_name in last_op.output_var_names:
-                    if out_name in concat_inputs:
-                        concat_idx = concat_inputs.index(out_name)
+                for out_var in last_op.outputs:
+                    if out_var in concat_inputs:
+                        concat_idx = concat_inputs.index(out_var)
                 offset = 0
                 for ci in range(concat_idx):
-                    offset += graph.var(concat_inputs[ci]).shape()[1]
+                    offset += graph.var(concat_inputs[ci]).shape[1]
                 corrected_idxs = [x + offset for x in pruned_idxs]
-            elif op.type == "batch_norm":
-                bn_inputs = op.input_vars
+            elif op.op().type() == "batch_norm":
+                bn_inputs = op.inputs
                 mean = bn_inputs[2]
                 variance = bn_inputs[3]
                 alpha = bn_inputs[0]
@@ -343,9 +342,9 @@ class PruneStrategy(Strategy):
                 ratio=ratio,
                 lazy=lazy,
                 only_graph=only_graph)
-            ops = param.output_ops
+            ops = param.outputs
             for op in ops:
-                if op.type == 'conv2d':
+                if op.op().type() == 'conv2d':
                     brother_ops = self._seach_brother_ops(graph, op)
                     for broher in brother_ops:
                         for p in graph.get_param_by_op(broher):
@@ -367,31 +366,35 @@ class PruneStrategy(Strategy):
             graph: The graph to be searched.
             op_node: The start node for searching.
         """
-        visited = [op_node.idx]
+        visited = [op_node.id()]
         stack = []
         brothers = []
         for op in graph.next_ops(op_node):
-            if (op.type != 'conv2d') and (op.type != 'fc') and (
-                    not op.is_bwd_op()) and (not op.is_opt_op()):
+            if (op.op().type() != 'conv2d') and (op.op().type() != 'fc') and (
+                    not graph.is_bwd_op(op)) and (not graph.is_opt_op(op)):
                 stack.append(op)
-                visited.append(op.idx)
+                visited.append(op.id())
         while len(stack) > 0:
             top_op = stack.pop()
             for parent in graph.pre_ops(top_op):
-                if parent.idx not in visited and (not parent.is_bwd_op()) and (
-                        not parent.is_opt_op()):
-                    if ((parent.type == 'conv2d') or (parent.type == 'fc')):
+                if parent.id() not in visited and (
+                        not graph.is_bwd_op(parent)) and (
+                            not graph.is_opt_op(parent)):
+                    if ((parent.op().type() == 'conv2d') or
+                        (parent.op().type() == 'fc')):
                         brothers.append(parent)
                     else:
                         stack.append(parent)
-                    visited.append(parent.idx)
+                    visited.append(parent.id())
 
             for child in graph.next_ops(top_op):
-                if (child.type != 'conv2d') and (child.type != 'fc') and (
-                        child.idx not in visited) and (
-                            not child.is_bwd_op()) and (not child.is_opt_op()):
+                if (child.op().type() != 'conv2d') and (
+                        child.op().type() != 'fc') and (
+                            child.id() not in visited) and (
+                                not graph.is_bwd_op(child)) and (
+                                    not graph.is_opt_op(child)):
                     stack.append(child)
-                    visited.append(child.idx)
+                    visited.append(child.id())
         return brothers
 
     def _prune_graph(self, graph, target_graph):

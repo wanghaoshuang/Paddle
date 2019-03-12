@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import executor
-from .executor import *
-from . import graph
-from .graph import *
+from . import graph_wrapper
+from .graph_wrapper import *
 from . import graph_pass
 from .graph_pass import *
-__all__ = executor.__all__
-__all__ += graph.__all__
+__all__ = []
+__all__ += graph_wrapper.__all__
 __all__ += graph_pass.__all__

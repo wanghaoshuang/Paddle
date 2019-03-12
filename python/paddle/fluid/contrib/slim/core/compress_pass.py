@@ -16,6 +16,7 @@ from ....core import CPUPlace
 from .... import compiler
 from .... import io
 from .... import profiler
+from .... import executor
 from ....data_feeder import DataFeeder
 from .....reader import xmap_readers
 from ..graph import *
@@ -131,7 +132,7 @@ class Context(object):
         assert self.eval_reader is not None
         eval_graph = self.eval_graph
         eval_graph.re_compile()
-        executor = get_executor(eval_graph, self.place)
+        exe = executor.Executor(self.place)
         results = []
         batch_id = 0
         s_time = time.time()
@@ -139,8 +140,16 @@ class Context(object):
         if sampled_rate:
             reader = cached_reader(reader, sampled_rate, self.cache_path,
                                    cached_id)
+
+        feeder = DataFeeder(
+            feed_list=eval_graph.in_nodes.values(),
+            place=self.place,
+            program=eval_graph.program)
         for data in reader():
-            result = executor.run(eval_graph, data=data)
+            result = exe.run(eval_graph.compiled_graph,
+                             scope=eval_graph.scope,
+                             fetch_list=eval_graph.out_nodes.values(),
+                             feed=feeder.feed(data))
             result = [np.mean(r) for r in result]
             results.append(result)
             if batch_id % 20 == 0:
@@ -185,14 +194,14 @@ class CompressPass(object):
         self.strategies = []
         self.epoch = 0
         self.place = CPUPlace() if place is None else place
-        self.train_graph = Graph(
+        self.train_graph = GraphWrapper(
             train_program,
             scope,
             in_nodes=train_feed_list,
             out_nodes=train_fetch_list,
             place=self.place,
             for_test=False)
-        self.eval_graph = Graph(
+        self.eval_graph = GraphWrapper(
             eval_program,
             scope,
             in_nodes=eval_feed_list,
@@ -204,7 +213,7 @@ class CompressPass(object):
         self.teacher_graphs = []
         for teacher in teacher_programs:
             self.teacher_graphs.append(
-                Graph(
+                GraphWrapper(
                     teacher, scope, place=self.place, for_test=True))
 
         self.checkpoint = None
@@ -237,10 +246,8 @@ class CompressPass(object):
 
     def _init_model(self, context):
         if self.init_model and os.path.exists(self.init_model):
-            exe = get_executor(context.train_graph, context.place)
-
+            exe = executor.Executor(context.place)
             context.train_graph.load_persistables(self.init_model, exe)
-            context.train_graph.infer_shape()
 
             context.eval_graph.update_param_shape()
             context.eval_graph.update_groups_of_conv()
@@ -272,7 +279,7 @@ class CompressPass(object):
                         strategies = pickle.load(strategy_file)
 
                 if os.path.exists(model_path):
-                    exe = get_executor(context.optimize_graph, context.place)
+                    exe = executor.Executor(context.place)
                     context.optimize_graph.load_persistables(model_path, exe)
                     context.eval_graph.update_param_shape()
                     context.eval_graph.update_groups_of_conv()
@@ -288,7 +295,7 @@ class CompressPass(object):
             strategy_path = os.path.join(checkpoint_path, 'strategies')
             if not os.path.isdir(model_path):
                 os.makedirs(model_path)
-            exe = get_executor(context.optimize_graph, context.place)
+            exe = executor.Executor(context.place)
             context.optimize_graph.save_persistables(model_path, exe)
             context.to_file(context_path)
             with open(strategy_path, 'wb') as strategy_file:
@@ -297,16 +304,23 @@ class CompressPass(object):
 
     def _train_one_epoch(self, context):
 
-        executor = get_executor(context.optimize_graph, self.place)
+        exe = executor.Executor(context.place)
+        feeder = DataFeeder(
+            feed_list=context.optimize_graph.in_nodes.values(),
+            place=self.place,
+            program=context.optimize_graph.program)
 
-        feed_reader = FeedReader(context.train_reader,
-                                 context.optimize_graph.data_feeder)
+        feed_reader = FeedReader(context.train_reader, feeder)
 
         context.optimize_graph.re_compile()
         for feed in feed_reader():
             for strategy in self.strategies:
                 strategy.on_batch_begin(context)
-            results = executor.run(context.optimize_graph, data=None, feed=feed)
+            results = exe.run(
+                context.optimize_graph.compiled_graph,
+                scope=context.optimize_graph.scope,
+                fetch_list=context.optimize_graph.out_nodes.values(),
+                feed=feed)
             results = [float(np.mean(result)) for result in results]
             if context.batch_id % 20 == 0:
                 logger.info("epoch:{}; batch_id:{}; {} = {}".format(
@@ -353,7 +367,6 @@ class CompressPass(object):
         for strategy in self.strategies:
             strategy.on_compression_begin(context)
         start = context.epoch_id
-        self._eval(context)
         for epoch in range(start, self.epoch):
             context.epoch_id = epoch
             for strategy in self.strategies:
