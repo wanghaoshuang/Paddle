@@ -38,21 +38,30 @@ class OptimizeGraphPass(GraphPass):
     Generate a graph for pruning parameters from target graph.
     """
 
-    def __init__(self, scope, place, optimizer, loss_name):
+    def __init__(self,
+                 scope,
+                 place,
+                 optimizer,
+                 loss_name,
+                 program,
+                 no_grad_var_names=[]):
         super(OptimizeGraphPass, self).__init__()
         self.optimizer = optimizer
         self.loss_name = loss_name
+        self.program = program
         self.scope = scope
         self.place = place
+        self.no_grad_var_names = no_grad_var_names
 
     def apply(self, graph):
         assert isinstance(graph, IrGraph)
         main_program = graph.to_program()
+        main_program._copy_param_info_from(self.program)
         startup_program = Program()
         with program_guard(
                 main_program=main_program, startup_program=startup_program):
             target = main_program.global_block().var(self.loss_name)
-            self.optimizer.minimize(target)
+            self.optimizer.minimize(target, no_grad_set=self.no_grad_var_names)
         exe = Executor(self.place)
         exe.run(program=startup_program, scope=self.scope)
         return IrGraph(core.Graph(main_program.desc), for_test=False)

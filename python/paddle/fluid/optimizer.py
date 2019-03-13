@@ -217,7 +217,9 @@ class Optimizer(object):
 
         # Allways called under program_guard use global block as loss block
         global_block = framework.default_main_program().global_block()
+        print('----------_create_optimization_pass------------------')
         start = len(global_block.ops)
+        print('start: %s' % start)
         self.helper = LayerHelper(self.__class__.__name__)
         self._create_accumulators(global_block,
                                   [p[0] for p in parameters_and_grads])
@@ -239,6 +241,7 @@ class Optimizer(object):
         self._finish_update(global_block, parameters_and_grads)
 
         end = len(global_block.ops)
+        print('end: %s' % start)
         return global_block._slice_ops(start, end)
 
     def _process_distribute_lookuptable(self, param_grads):

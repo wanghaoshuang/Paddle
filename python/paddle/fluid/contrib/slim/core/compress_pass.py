@@ -1,4 +1,4 @@
-#   Copyright (c) 2018 PaddlePaddle Authors. All Rights Reserve.
+#   Copyright (c) 2019 PaddlePaddle Authors. All Rights Reserve.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,23 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ....core import CPUPlace
-from .... import compiler
-from .... import io
-from .... import profiler
-from .... import executor
-from ....data_feeder import DataFeeder
-from .....reader import xmap_readers
-from ..graph import *
-from config import ConfigFactory
-import numpy as np
-from collections import Iterable
 import time
 import os
 import logging
 import sys
 import pickle
 import functools
+import numpy as np
+from collections import Iterable
+from config import ConfigFactory
+from ....core import CPUPlace
+from ....executor import scope_guard
+from ....data_feeder import DataFeeder
+from .....reader import xmap_readers
+from .... import compiler
+from .... import io
+from .... import profiler
+from .... import executor
+from ..graph import *
 
 __all__ = ['Context', 'CompressPass']
 
@@ -37,7 +38,11 @@ logging.basicConfig(level=logging.INFO, format=FORMAT, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 
-def FeedReader(reader, feeder):
+def feed_reader(reader, feeder):
+    """
+    A decorator for speedup data feeder.
+    """
+
     def feed(data, feeder):
         return feeder.feed(data)
 
@@ -131,7 +136,7 @@ class Context(object):
         assert self.eval_graph is not None
         assert self.eval_reader is not None
         eval_graph = self.eval_graph
-        eval_graph.re_compile()
+        eval_graph.compile()
         exe = executor.Executor(self.place)
         results = []
         batch_id = 0
@@ -247,9 +252,10 @@ class CompressPass(object):
     def _init_model(self, context):
         if self.init_model and os.path.exists(self.init_model):
             exe = executor.Executor(context.place)
-            context.train_graph.load_persistables(self.init_model, exe)
+            with scope_guard(scope):
+                context.train_graph.load_persistables(self.init_model, exe)
 
-            context.eval_graph.update_param_shape()
+            context.eval_graph.update_param_shape(context.scope)
             context.eval_graph.update_groups_of_conv()
             logger.info("Init model from: {}".format(self.init_model))
 
@@ -280,8 +286,10 @@ class CompressPass(object):
 
                 if os.path.exists(model_path):
                     exe = executor.Executor(context.place)
-                    context.optimize_graph.load_persistables(model_path, exe)
-                    context.eval_graph.update_param_shape()
+                    with scope_guard(context.scope):
+                        context.optimize_graph.load_persistables(model_path,
+                                                                 exe)
+                    context.eval_graph.update_param_shape(context.scope)
                     context.eval_graph.update_groups_of_conv()
                     logger.info("Loaded params from: {}".format(model_path))
         return context, strategies
@@ -310,9 +318,9 @@ class CompressPass(object):
             place=self.place,
             program=context.optimize_graph.program)
 
-        feed_reader = FeedReader(context.train_reader, feeder)
+        feed_reader = feed_reader(context.train_reader, feeder)
 
-        context.optimize_graph.re_compile()
+        context.optimize_graph.compile()
         for feed in feed_reader():
             for strategy in self.strategies:
                 strategy.on_batch_begin(context)
