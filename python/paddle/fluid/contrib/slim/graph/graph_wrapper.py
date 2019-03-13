@@ -28,9 +28,7 @@ import pickle
 import os
 
 __all__ = [
-    'Graph',
-    'ImitationGraph',
-    'IRGraph',
+    'GraphWrapper',
     'save_inference_graph_model',
     'load_inference_graph_model',
     'load_persistables',
@@ -41,125 +39,9 @@ __all__ = [
 ]
 
 
-class Graph(object):
-    """
-    Base class for all graph.
-    """
-
-    def __init__(self):
-        pass
-
-    def has(self, attr_name):
-        """
-        Test attr_name whether in the graph or not.
-        """
-        pass
-
-    def set(self, attr_name, attr):
-        """
-        Register attr for graph using the given attr_name.
-        """
-        pass
-
-    def get(self, attr_name):
-        """
-        Get attr from the graph by attr_name.
-        """
-        pass
-
-    def all_parameters(self):
-        """
-        Return all the parameters in current graph.
-        """
-        pass
-
-    def create_parameter(self, *args, **kwargs):
-        """
-        Create a parameter in the graph.
-        """
-        pass
-
-    def all_vars(self):
-        """
-        Return all the variables in current graph.
-        """
-        pass
-
-    def vars_map(self):
-        """
-        Return the variables map, key-value: var_name --> var
-        """
-        pass
-
-    def all_ops(self):
-        """
-        Return all the operations in current graph.
-        """
-        pass
-
-    def index(self, op):
-        """
-        Return the index of the op in current graph.
-        """
-        pass
-
-    def var(self, name):
-        """
-        Get a Variable by the given name.
-        """
-        pass
-
-    def create_var(self, *args, **kwargs):
-        """
-        Create a var in the graph.
-        """
-        pass
-
-    def remove_var(self, name):
-        """
-        Remove a var from the graph by the given name.
-        """
-        pass
-
-    def insert_op(self, index, *args, **kwargs):
-        """
-        Insert an operation before the index op.
-        """
-        pass
-
-    def prepend_op(self, *args, **kwargs):
-        """
-        Insert an operation before the first op.
-        """
-        pass
-
-    def remove_op(self, index):
-        """
-        Remove the index operation.
-        """
-        pass
-
-    def clone(self, for_test=False):
-        """
-        Create a new duplicated graph.
-
-        Some operators, e.g., :code:`batch_norm`, behave differently between
-        training and testing. They have an attribute, :code:`is_test`, to
-        control this behaviour. This method will change the :code:`is_test`
-        attribute of them to :code:`True` when :code:`for_test=True`.
-        """
-        pass
-
-    def prune(self, feeds, fetches):
-        """
-        Prune the graph according to feeds and fetches.
-        """
-        pass
-
-
-class ImitationGraph(Graph):
+class GraphWrapper(Object):
     def __init__(self, program=None, scope=None, in_nodes=[], out_nodes=[]):
-        super(ImitationGraph, self).__init__()
+        super(GraphWrapper, self).__init__()
         self.program = Program() if program is None else program
         self.compiled_graph = None
         self.scope = scope
@@ -252,13 +134,13 @@ class ImitationGraph(Graph):
         out_nodes = OrderedDict([(key, value)
                                  for key, value in self.out_nodes.items()
                                  if value in fetches])
-        return ImitationGraph(program, self.scope, in_nodes, out_nodes)
+        return GraphWrapper(program, self.scope, in_nodes, out_nodes)
 
     def get_var(self, var_name):
         return self.program.global_block().var(var_name)
 
     def clone(self, for_test=False):
-        return ImitationGraph(
+        return GraphWrapper(
             self.program.clone(for_test), self.scope,
             copy.deepcopy(self.in_nodes), copy.deepcopy(self.out_nodes))
 
