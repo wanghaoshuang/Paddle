@@ -288,9 +288,13 @@ class CompressPass(object):
 
                 if os.path.exists(model_path):
                     exe = get_executor(context.optimize_graph, context.place)
-                    load_persistables(context.optimize_graph, model_path, exe)
-                    update_param_shape(context.eval_graph)
-                    update_depthwise_conv(context.eval_graph)
+                    with scope_guard(context.scope):
+                        context.optimize_graph.load_persistables(model_path,
+                                                                 exe)
+                    context.optimize_graph.update_param_shape(context.scope)
+                    context.optimize_graph.update_groups_of_conv()
+                    context.eval_graph.update_param_shape()
+                    context.eval_graph.update_groups_of_conv()
                     logger.info("Loaded params from: {}".format(model_path))
         return context, strategies
 

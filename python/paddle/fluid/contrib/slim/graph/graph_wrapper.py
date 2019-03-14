@@ -27,127 +27,224 @@ import numpy as np
 import pickle
 import os
 
-__all__ = [
-    'GraphWrapper',
-    'save_inference_graph_model',
-    'load_inference_graph_model',
-    'load_persistables',
-    'save_persistables',
-    'update_depthwise_conv',
-    'update_param_shape',
-    'infer_shape',
-]
+__all__ = ['GraphWrapper', ]
 
 
-class GraphWrapper(Object):
-    def __init__(self, program=None, scope=None, in_nodes=[], out_nodes=[]):
+class VarWrapper(object):
+    def __init__(self, var, graph):
+        assert isinstance(var, Variable)
+        assert isinstance(graph, GraphWrapper)
+        self._var = var
+        self._graph = graph
+
+    def __eq__(self, v):
+        """
+        Overwrite this function for ...in... syntax in python.
+        """
+        return self._var.name == v._var.name
+
+    def name(self):
+        """
+        Get the name of the variable.
+        """
+        return self._var.name
+
+    def shape(self):
+        """
+        Get the shape of the varibale.
+        """
+        return self._var.shape
+
+    def set_shape(self, shape):
+        """
+        Set the shape of the variable.
+        """
+        self._var.desc.set_shape(shape)
+
+    def inputs(self):
+        """
+        Get all the operators that use this variable as output.
+        Returns:
+            list<OpWrapper>: A list of operators.
+        """
+        ops = []
+        for op in self._graph.ops():
+            if self in op.inputs():
+                ops.append(op)
+        return ops
+
+    def outputs(self):
+        """
+        Get all the operators that use this variable as input.
+        Returns:
+            list<OpWrapper>: A list of operators.
+        """
+        ops = []
+        for op in self._graph.ops():
+            if self in op.outputs():
+                ops.append(op)
+        return ops
+
+
+class OpWrapper(object):
+    def __init__(self, op):
+        self._op = op
+
+    def __eq__(self, op):
+        """
+        Overwrite this function for ...in... syntax in python.
+        """
+        return self.idx() == op.idx()
+
+    def inputs(self):
+        """
+        Get all the input variables of this operator.
+        """
+        return [
+            self._graph.var(var_name) for var_name in self._op.input_arg_names
+        ]
+
+    def outputs(self):
+        """
+        Get all the output variables of this operator.
+        """
+        return [
+            self._graph.var(var_name) for var_name in self._op.output_arg_names
+        ]
+
+    def idx(self):
+        """
+        Get the id of this operator.
+        """
+        return self._op.idx()
+
+    def type(self):
+        """
+        Get the type of this operator.
+        """
+        return self._op.type()
+
+    def is_bwd_op(self):
+        """
+        Whether this operator is backward op.
+        """
+        return self.type().endswith('_grad')
+
+    def is_opt_op(self):
+        """
+        Whether this operator is optimizer op.
+        """
+        return self.type() in OPTIMIZER_OPS
+
+    def inputs(self, name):
+        """
+        Get all the varibales by the input name.
+        """
+        self._op.input(name)
+
+    def outputs(self, name):
+        """
+        Get all the varibales by the output name.
+        """
+        self._op.output(name)
+
+    def set_attr(self, key, value):
+        """
+        Set the value of attribute by attribute's name.
+
+        Args:
+            key(str): the attribute name.
+            value(bool|int|str|float|list): the value of the attribute.
+        """
+        self._op._set_attr(key, value)
+
+    def attr(self, name):
+        """
+        Get the attribute by name.
+
+        Args:
+            name(str): the attribute name.
+
+        Returns:
+            bool|int|str|float|list: The attribute value. The return value
+            can be any valid attribute type.
+        """
+        self._op.attr(name)
+
+
+class GraphWrapper(object):
+    """
+    It is a wrapper of paddle.fluid.framework.IrGraph with some special functions
+    for paddle slim framework.
+    """
+
+    def __init__(self, program=None, in_nodes=[], out_nodes=[]):
+        """
+        Args:
+            program(framework.Program): A program with 
+            in_nodes(dict): A dict to indicate the input nodes of the graph.
+                            The key is user-defined and human-readable name.
+                            The value is the name of IrVarNode or Variable.
+            out_nodes(dict): A dict to indicate the input nodes of the graph.
+                            The key is user-defined and human-readable name.
+                            The value is the name of IrVarNode or Variable.
+        """
         super(GraphWrapper, self).__init__()
         self.program = Program() if program is None else program
         self.compiled_graph = None
-        self.scope = scope
         self.in_nodes = in_nodes
         self.out_nodes = out_nodes
         self._attrs = collections.OrderedDict()
 
-    def init_vars(self, need_inited, place):
-        init_program = Program()
-        for var, initializer in need_inited.iteritems():
-            init_program.global_block()._clone_variable(var)
-            initializer(var, init_program.global_block())
-        exe = Executor(place)
-        exe.run(program=init_program, scope=self.scope)
-
-    def has(self, attr_name):
-        return attr_name in self._attrs
-
-    def set(self, attr_name, attr):
-        if not has(attr_name):
-            self._attrs[attr_name] = attr
-        else:
-            raise ValueError("{} attr already set in the graph.".format(
-                attr_name))
-
-    def get(self, attr_name):
-        if has(attr_name):
-            return self._attrs[attr_name]
-        else:
-            raise ValueError("{} attr not registered in the graph.".format(
-                attr_name))
-
     def all_parameters(self):
-        return self.program.block(0).all_parameters()
+        """
+        Get all the parameters in this graph.
+        Returns:
+            list<VarWrapper>: A list of VarWrapper instances.
+        """
+        params = []
+        for block in self.program.blocks:
+            for param in block.all_parameters():
+                params.append(VarWrapper(param))
+        return params
 
-    def create_parameter(self, *args, **kwargs):
-        return self.program.block(0).create_parameter(*args, **kwargs)
-
-    def all_vars(self):
-        for each_var in list(self.program.block(0).vars.values()):
-            yield each_var
-
-    def vars_map(self):
-        return self.program.block(0).vars
-
-    def all_ops(self):
-        return self.program.block(0).ops
-
-    def index(self, op):
-        return self.program.block(0).ops.index(op)
+    def ops(self):
+        """
+        Return all operator nodes included in the graph as a set.
+        """
+        ops = []
+        for block in self.program.blocks:
+            for op in block.ops:
+                ops.append(OpWrapper(op))
+        return ops
 
     def var(self, name):
-        return self.program.block(0).var(name)
-
-    def create_var(self, *args, **kwargs):
-        return self.program.block(0).create_var(*args, **kwargs)
-
-    def remove_var(self, name):
-        self.program.block(0)._remove_var(name)
-
-    def insert_op(self, index, *args, **kwargs):
-        return self.program.block(0)._insert_op(index=index, *args, **kwargs)
-
-    def prepend_op(self, *args, **kwargs):
-        return self.program.block(0)._prepend_op(*args, **kwargs)
-
-    def remove_op(self, index):
-        self.program.block(0)._remove_op(index)
-
-    def prune(self, feeds, fetches):
-        if not isinstance(feeds, Iterable):
-            feeds = [feeds]
-
-        if not isinstance(fetches, Iterable):
-            fetches = [fetches]
-
-        program = self.program._prune(fetches)
-
-        feeds = [
-            feed.name if isinstance(feed, Variable) else feed for feed in feeds
-        ]
-        fetches = [
-            fetch.name if isinstance(fetch, Variable) else fetch
-            for fetch in fetches
-        ]
-
-        in_nodes = OrderedDict([(key, value)
-                                for key, value in self.in_nodes.items()
-                                if value in feeds])
-        out_nodes = OrderedDict([(key, value)
-                                 for key, value in self.out_nodes.items()
-                                 if value in fetches])
-        return GraphWrapper(program, self.scope, in_nodes, out_nodes)
-
-    def get_var(self, var_name):
-        return self.program.global_block().var(var_name)
+        """
+        Get the variable by variable name.
+        """
+        return self.program.global_block().var(name)
 
     def clone(self, for_test=False):
+        """
+        Clone a new graph from current graph.
+        Returns:
+            (GraphWrapper): The wrapper of a new graph.
+        """
         return GraphWrapper(
             self.program.clone(for_test), self.scope,
             copy.deepcopy(self.in_nodes), copy.deepcopy(self.out_nodes))
 
     def merge(self, graph):
+        """
+        Merge a graph into current graph.
+        Args:
+            graph(GraphWrapper): The graph to be merged by current graph.
+        """
         for var in graph.program.list_vars():
             self.program.global_block()._clone_variable(var)
-        for op in graph.all_ops():
+            # TODO: parameters should be cloned
+        for op in graph.ops():
+            op = op._op
             inputs = {}
             outputs = {}
             attrs = {}
@@ -166,88 +263,73 @@ class GraphWrapper(Object):
             self.program.global_block().append_op(
                 type=op.type, inputs=inputs, outputs=outputs, attrs=attrs)
 
-    def ops(self):
-        return self.program.global_block().ops
-
     def program(self):
+        """
+        Get the program in current wrapper.
+        """
         return self.program
 
     def pre_ops(self, op):
+        """
+        Get all the previous operators of target operator.
+        Args:
+            op(OpWrapper): Target operator..
+        Returns:
+            list<OpWrapper>: A list of operators.
+        """
         ops = []
-        in_var_names = []
-        for input_name in op.input_names:
-            in_var_names += op.input(input_name)
         for p in self.ops():
-            for out_name in p.output_names:
-                for var_name in p.output(out_name):
-                    if var_name in in_var_names:
-                        ops.append(p)
+            for in_var in op.inputs():
+                if in_var in p.outputs():
+                    ops.append(p)
         return ops
 
     def next_ops(self, op):
+        """
+        Get all the next operators of target operator.
+        Args:
+            op(OpWrapper): Target operator..
+        Returns:
+            list<OpWrapper>: A list of operators.
+        """
         ops = []
-        out_var_names = []
-        for o in op.output_names:
-            out_var_names += op.output(o)
         for p in self.ops():
-            for input_name in p.input_names:
-                for var_name in p.input(input_name):
-                    if var_name in out_var_names:
-                        ops.append(p)
-        return ops
-
-    def get_ops_by_param(self, param):
-        ops = []
-        if isinstance(param, Variable):
-            param = param.name
-        for op in self.ops():
-            for name in op.input_names:
-                if param in op.input(name):
-                    ops.append(op)
+            for out_var in op.outputs:
+                if out_var in p.inputs:
+                    ops.append(p)
         return ops
 
     def get_param_by_op(self, op):
+        """
+        Get the parameters used by target operator.
+        """
+        assert isinstance(op, OpWrapper)
         params = []
-        for in_name in op.input_names:
-            for var_name in op.input(in_name):
-                var = self.get_var(var_name)
-                if isinstance(var, Parameter):
-                    params.append(var)
+        for var in op.inputs:
+            if isinstance(var._var, Parameter):
+                params.append(var)
+        assert len(params) > 0
         return params
 
-    def flops(self):
-        ret = 0
-        b_vars = {}
-        for var in self.program.list_vars():
-            b_vars[var.name] = var
-        for op in self.all_ops():
-            if op.type in ['conv2d', 'depthwise_conv2d', 'mul']:
-                _, _, _, flop = _count_shape_params_flops(b_vars, op)
-                ret += flop
-        return ret
-
     def numel_params(self):
+        """
+        Get the number of elements in all parameters.
+        """
         ret = 0
         for param in self.all_parameters():
-            ret += np.product(param.shape)
+            ret += np.product(param.shape())
         return ret
 
-    def serialize(self):
-        data = {}
-        data['program'] = self.program
-        data['in_nodes'] = self.in_nodes
-        data['out_nodes'] = self.out_nodes
-        data['attrs'] = self._attrs
-        return pickle.dumps(data)
-
-    def deserialize(self, s):
-        data = pickle.loads(s)
-        self.program = data['program']
-        self.in_nodes = data['in_nodes']
-        self.out_nodes = data['out_nodes']
-        self._attrs = data['attrs']
-
-    def get_optimize_graph(self, optimizer, place):
+    def get_optimize_graph(self, optimizer, place, scope):
+        """
+        Get a new graph for training by appending some backward operators and optimization operators.
+        Args:
+            optimizer: The optimzier used to generate training graph.
+            place: The place to run the graph.
+            scope: The scope used to run the graph. Some new variable will be added into this scope.
+        Returns:
+            (GraphWrapper): The wrapper of new graph with backward ops and optimization ops. 
+        """
         graph = self.clone()
         startup_program = Program()
         with program_guard(
@@ -261,138 +343,94 @@ class GraphWrapper(Object):
             optimizer.minimize(target)
 
         exe = Executor(place)
-        exe.run(program=startup_program, scope=self.scope)
+        exe.run(program=startup_program, scope=scope)
         return graph
 
+    def flops(self):
+        """
+        Get the flops of current graph.
+        """
+        flops = 0
+        for op in self.ops():
+            if op.type() in ['conv2d', 'depthwise_conv2d']:
+                filter_shape = op.input("Filter")[0].shape()
+                input_shape = op.input("Input")[0].shape()
+                output_shape = op.output("Output")[0].shape()
+                c_out, c_in, k_h, k_w = filter_shape
+                _, _, h_out, w_out = output_shape
+                groups = op.attr("groups")
+                kernel_ops = k_h * k_w * (c_in / groups)
+                if len(op.input("Bias")) > 0:
+                    with_bias = 1
+                else:
+                    with_bias = 0
+                flops += 2 * h_out * w_out * c_out * (kernel_ops + with_bias)
 
-class IRGraph(Graph):
-    pass
+            elif op.type() == 'pool2d':
+                input_shape = op.input("X")[0].shape()
+                output_shape = op.output("Out")[0].shape()
+                _, c_out, h_out, w_out = output_shape
+                k_size = op.attr("ksize")
+                flops += h_out * w_out * c_out * (k_size[0]**2)
 
+            elif op.op().type() == 'mul':
+                x_shape = op.input("X")[0].shape()
+                y_shape = op.input("Y")[0].shape()
+                if x_shape[0] == -1:
+                    x_shape[0] = 1
+                flops += 2 * x_shape[0] * x_shape[1] * y_shape[1]
 
-def save_persistables(graph, path, exe):
-    io.save_persistables(exe.exe, path, main_program=graph.program)
+            elif op.type() in ['relu', 'sigmoid', 'batch_norm']:
+                input_shape = op.input("X")[0].shape()
+                if input_shape[0] == -1:
+                    input_shape[0] = 1
+                flops += np.product(input_shape)
 
+        return flops
 
-def load_persistables(graph, path, exe):
-    def if_exist(var):
-        return os.path.exists(os.path.join(path, var.name))
+    def save_persistables(self, path, exe):
+        """
+        Save all the persistable variables into file.
+        Args:
+            path(str): The path to save the persistables.
+            exe(framework.Executor): The executor used to save the persistables.
+        """
+        io.save_persistables(exe, path, main_program=self.program)
 
-    io.load_vars(exe.exe, path, main_program=graph.program, predicate=if_exist)
-    update_param_shape(graph)
-    update_depthwise_conv(graph)
+    def load_persistables(self, path, exe):
+        """
+        Load the persistable variables from file.
+        Args:
+            path(str): The path to load the persistables.
+            exe(framework.Executor): The executor used to load the persistables.
+        """
 
+        def if_exist(var):
+            return os.path.exists(os.path.join(path, var.name))
 
-def update_param_shape(graph):
-    for param in graph.all_parameters():
-        tensor_shape = np.array(graph.scope.find_var(param.name).get_tensor(
-        )).shape
-        param.desc.set_shape(tensor_shape)
+        io.load_vars(
+            exe.exe, path, main_program=self.program, predicate=if_exist)
 
+    def update_param_shape(self, scope):
+        """
+        Update the shape of parameters in the graph according to tensors in scope.
+        It is used after loading pruned parameters from file.
+        """
+        for param in self.all_parameters():
+            tensor_shape = np.array(scope.find_var(param.name()).get_tensor(
+            )).shape
+            param.set_shape(tensor_shape)
 
-def infer_shape(graph):
-    for op in graph.all_ops():
-        if op.type != 'conditional_block':
-            op.desc.infer_shape(op.block.desc)
+    def infer_shape(self):
+        """
+        Update the groups of convolution layer according to current filters.
+        It is used after loading pruned parameters from file.
+        """
+        for op in self.ops():
+            if op.type() != 'conditional_block':
+                op._op.desc.infer_shape(op._op.block.desc)
 
-
-def update_depthwise_conv(graph):
-    for op in graph.all_ops():
-        if op.type == 'depthwise_conv2d':
-            op.desc._set_attr('groups',
-                              graph.get_var(op.input('Filter')[0]).shape[0])
-
-
-def save_inference_graph_model(dirname,
-                               feeded_var_names,
-                               target_var_names,
-                               place,
-                               graph=None,
-                               model_filename=None,
-                               params_filename=None,
-                               export_for_deployment=True):
-    target_vars = None
-    if target_var_names:
-        target_vars = [graph.var(name) for name in target_var_names]
-    exe = Executor(place)
-    save_inference_model(dirname, feeded_var_names, target_vars, exe,
-                         graph.program, model_filename, params_filename,
-                         export_for_deployment)
-
-
-def load_inference_graph_model(dirname,
-                               place,
-                               model_filename=None,
-                               params_filename=None,
-                               pserver_endpoints=None):
-    exe = Executor(place)
-    return load_inference_model(dirname, exe, model_filename, params_filename,
-                                pserver_endpoints)
-
-
-def _count_shape_params_flops(b_vars, one_op):
-    '''
-    Args:
-        b_vars: all vars of one block
-        one_op: one operator to count
-    Returns:
-        in_data_shape: one operator's input data shape
-        out_data_shape: one operator's output data shape
-        PARAMs: one operator's PARAMs 
-        FLOPs: : one operator's FLOPs
-    '''
-    if one_op.type in ['conv2d', 'depthwise_conv2d']:
-        k_arg_shape = b_vars[one_op.input("Filter")[0]].shape
-        in_data_shape = b_vars[one_op.input("Input")[0]].shape
-        out_data_shape = b_vars[one_op.output("Output")[0]].shape
-        c_out, c_in, k_h, k_w = k_arg_shape
-        _, c_out_, data_h, data_w = out_data_shape
-        #        assert c_out == c_out_, 'shape error!'
-        k_groups = one_op.attr("groups")
-        kernel_ops = k_h * k_w * (c_in / k_groups)
-        # keras's conv use bias defaultly
-        # bias_ops = 0 if one_op.input("Bias") == [] else 1
-        bias_ops = 0  # for test
-        PARAMs = c_out * (kernel_ops + bias_ops)
-        FLOPs = 2 * data_h * data_w * c_out * (kernel_ops + bias_ops)
-
-    elif one_op.type == 'pool2d':
-        in_data_shape = b_vars[one_op.input("X")[0]].shape
-        out_data_shape = b_vars[one_op.output("Out")[0]].shape
-        _, c_out, data_h, data_w = out_data_shape
-        k_size = one_op.attr("ksize")
-        PARAMs = 0
-        FLOPs = data_h * data_w * c_out * (k_size[0]**2)
-
-    elif one_op.type == 'mul':
-        k_arg_shape = b_vars[one_op.input("Y")[0]].shape
-        in_data_shape = b_vars[one_op.input("X")[0]].shape
-        out_data_shape = b_vars[one_op.output("Out")[0]].shape
-        # TODO: fc has mul ops
-        # add attr to mul op, tell us whether it belongs to 'fc'
-        # this's not the best way
-        if 'fc' not in one_op.output("Out")[0]:
-            return None
-        k_in, k_out = k_arg_shape
-        # bias in sum op
-        PARAMs = k_in * k_out + 1
-        FLOPs = k_in * k_out
-
-    elif one_op.type in ['relu', 'sigmoid']:
-        in_data_shape = b_vars[one_op.input("X")[0]].shape
-        out_data_shape = b_vars[one_op.output("Out")[0]].shape
-        _, c_in, data_h, data_w = in_data_shape
-        PARAMs = 0
-        FLOPs = data_h * data_w * c_in
-
-    elif one_op.type == 'batch_norm':
-        in_data_shape = b_vars[one_op.input("X")[0]].shape
-        out_data_shape = b_vars[one_op.output("Y")[0]].shape
-        _, c_in, data_h, data_w = in_data_shape
-        # gamma, beta, mean, std
-        PARAMs = c_in * 4
-        FLOPs = data_h * data_w * c_in
-
-    else:
-        return None
-
-    return in_data_shape, out_data_shape, PARAMs, FLOPs
+    def update_groups_of_conv(self):
+        for op in self.ops():
+            if op.type() == 'depthwise_conv2d':
+                op.set_attr('groups', op.input('Filter')[0].shape()[0])
