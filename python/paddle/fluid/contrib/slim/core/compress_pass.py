@@ -36,7 +36,10 @@ logging.basicConfig(level=logging.INFO, format=FORMAT, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 
-def FeedReader(reader, feed_list, place, program=None):
+def feed_reader(reader, feed_list, place, program=None):
+    """
+    A decorator for speedup data feeder.
+    """
     feeder = DataFeeder(feed_list, place, program)
 
     def feed(data, feeder):
@@ -47,6 +50,14 @@ def FeedReader(reader, feed_list, place, program=None):
 
 
 def cached_reader(reader, sampled_rate, cache_path, cached_id):
+    """
+    Sample partial data from reader and cache them into local file system.
+    Args:
+        reader: Iterative data source.
+        sampled_rate(float): The sampled rate used to sample partial data for evaluation. None means using all data in eval_reader. default: None.
+        cache_path(str): The path to cache the sampled data.
+        cached_id(int): The id of dataset sampled. Evaluations with same cached_id use the same sampled dataset. default: 0.
+    """
     np.random.seed(cached_id)
     cache_path = cache_path + "/" + str(cached_id)
     logger.debug('read data from: {}'.format(cache_path))
@@ -73,12 +84,6 @@ def cached_reader(reader, sampled_rate, cache_path, cached_id):
 class Context(object):
     """
     The context in the process of compression.
-    Args:
-        exe: The executor used to execute graph.
-        graph: The graph to be compressed.
-        scope: The scope used to execute graph.
-        program_exe: The program_exe is used to execute the program
-                     created for modifying the variables in scope.
     """
 
     def __init__(self,
@@ -90,6 +95,17 @@ class Context(object):
                  teacher_graphs=None,
                  train_optimizer=None,
                  distiller_optimizer=None):
+        """
+        Args:
+            place: The device place where the compression job running.
+            train_graph: The graph with loss as output node.
+            eval_graph: The graph used for evaluation.
+            eval_reader: The data reader used for evaluation.
+            teacher_graphs: The teacher graphs used in distillation strategies.
+            train_optimizer: The optimizer used to append backward ops and
+                             optimization ops into train_graph.
+            distiller_optimizer: The optimizer used by distillation strategies.
+        """
         # The total number of epoches to be trained.
         self.epoch = 0
         # Current epoch
@@ -113,26 +129,35 @@ class Context(object):
         self.eval_results = {}
 
     def to_file(self, file_name):
+        """
+        Save the context into file.
+        """
         data = {}
         data['epoch_id'] = self.epoch_id
         data['eval_results'] = self.eval_results
-        #        data['eval_graph'] = self.eval_graph.serialize()
-        #        data['train_graph'] = self.train_graph.serialize()
-        #        data['optimize_graph'] = self.optimize_graph.serialize()
         with open(file_name, 'wb') as context_file:
             pickle.dump(data, context_file)
 
     def from_file(self, file_name):
+        """
+        Load the context from file.
+        """
         with open(file_name) as context_file:
             data = pickle.load(context_file)
             self.epoch_id = data['epoch_id']
             self.eval_results = data['eval_results']
 
-#            self.eval_graph.deserialize(data['eval_graph'])
-#            self.train_graph.deserialize(data['train_graph'])
-#            self.optimize_graph.deserialize(data['optimize_graph'])
-
     def eval_converged(self, metric_name, delta=0.001):
+        """
+        Check whether the training has been converged.
+        Args:
+            metric_name(str): The metric used to check convergence.
+            delta(float): '(metric[k] - metric[k-1] / metric[k-1]) < delta'
+                          means that the training has been converged.
+        Returns:
+            bool: True means the training has been converged.
+        """
+        # TODO(wanghaoshuang@baidu.com): enhence this method.
         if (metric_name not in self.eval_results
             ) or len(self.eval_results[metric_name]) < 2:
             return False
@@ -141,6 +166,14 @@ class Context(object):
         return abs(results[1] - results[0]) / results[0] < delta
 
     def run_eval_graph(self, sampled_rate=None, cached_id=0):
+        """
+        Evaluate the current mode in context.
+        Args:
+            sampled_rate(float): The sampled rate used to sample partial data
+            for evaluation. None means using all data in eval_reader. default: None.
+            cached_id(int): The id of dataset sampled. Evaluations with same
+                            cached_id use the same sampled dataset. default: 0.
+        """
         logger.info('Running evaluation')
         assert self.eval_graph is not None
         assert self.eval_reader is not None
@@ -179,15 +212,6 @@ class Context(object):
 class CompressPass(object):
     """
     The pass used to compress model.
-    Args:
-        place: The device used in compression.
-        data_reader: The data_reader used to run graph.
-        data_feeder: The data_feeder used to run graph.
-        scope: The scope used to run graph.
-        metrics: The metrics for evaluating model.
-        epoch: The total epoches of trainning in compression.
-        program_exe: The program_exe is used to execute the program
-                     created for modifying the variables in scope.
     """
 
     def __init__(self,
@@ -205,6 +229,32 @@ class CompressPass(object):
                  checkpoint_path='./checkpoints',
                  train_optimizer=None,
                  distiller_optimizer=None):
+        """
+        Args:
+            place(fluid.Place): The device place where the compression job running.
+            scope(fluid.core.Scope): The scope used to run graph.
+            train_program(Program): The main program to be compressed. It must have loss op.
+            train_reader: The data reader used for training.
+            train_feed_list(dict): A dict to indicate the input variable of the training program.
+                                   The key is user-defined and human-readable name.
+                                   The value is the name of Variable.
+            train_fetch_list(dict): A dict to indicate the output variable of the training program.
+                                   The key is user-defined and human-readable name.
+                                   The value is the name of Variable.
+            eval_program(Program): The program used for evaluation.
+            eval_reader: The data reader used for evaluation.
+            eval_feed_list(dict): A dict to indicate the input variable of the evaluation program.
+                                   The key is user-defined and human-readable name.
+                                   The value is the name of Variable.
+            eval_fetch_list(dict): A dict to indicate the output variable of the evaluation program.
+                                   The key is user-defined and human-readable name.
+                                   The value is the name of Variable.
+            teacher_programs: The teacher graphs used in distillation strategies.
+            train_optimizer: The optimizer used to append backward ops and
+                             optimization ops into train_graph.
+            distiller_optimizer: The optimizer used by distillation strategies.
+
+        """
         self.strategies = []
         self.epoch = 0
         self.place = CPUPlace() if place is None else place
@@ -242,6 +292,11 @@ class CompressPass(object):
         self.epoch = max(strategy.end_epoch, self.epoch)
 
     def config(self, config_file):
+        """
+        Configure the compress pass from file with yaml format.
+        Args:
+            config_file(str): The config file in local file system.
+        """
         factory = ConfigFactory(config_file)
         self.epoch = factory.compress_pass['epoch']
         for strategy in factory.compress_pass['strategies']:
@@ -253,6 +308,9 @@ class CompressPass(object):
             self.init_model = factory.compress_pass['init_model']
 
     def _init_model(self, context):
+        """
+        Load model that has been compressed. 
+        """
         if self.init_model and os.path.exists(self.init_model):
             exe = get_executor(context.train_graph, context.place)
             load_persistables(context.train_graph, self.init_model, exe)
@@ -262,6 +320,9 @@ class CompressPass(object):
             logger.info("Init model from: {}".format(self.init_model))
 
     def _load_checkpoint(self, context):
+        """
+        Load checkpoints from file.
+        """
         logger.debug('_load_checkpoint')
         strategies = self.strategies
         if self.checkpoint_path:
@@ -299,6 +360,9 @@ class CompressPass(object):
         return context, strategies
 
     def _save_checkpoint(self, context):
+        """
+        Save checkpoints to file.
+        """
         if context.epoch_id % 1 == 0 and self.checkpoint_path:
             checkpoint_path = os.path.join(self.checkpoint_path,
                                            str(context.epoch_id))
@@ -315,6 +379,9 @@ class CompressPass(object):
             logger.info('Saved checkpoint to: {}'.format(checkpoint_path))
 
     def _train_one_epoch(self, context):
+        """
+        Train one epoch.
+        """
         current_lr = np.array(
             context.optimize_graph.scope.find_var('learning_rate').get_tensor(
             ))[0]
@@ -324,7 +391,7 @@ class CompressPass(object):
 
         executor = get_executor(context.optimize_graph, self.place)
 
-        feed_reader = FeedReader(
+        feed_reader = feed_reader(
             context.train_reader,
             context.optimize_graph.in_nodes.values(),
             self.place,
@@ -336,7 +403,6 @@ class CompressPass(object):
                     loss_name=context.optimize_graph.out_nodes['loss'])
 
         for feed in feed_reader():
-            #        for data in context.train_reader():
             for strategy in self.strategies:
                 strategy.on_batch_begin(context)
             results = executor.run(context.optimize_graph, data=None, feed=feed)
@@ -352,6 +418,9 @@ class CompressPass(object):
         context.batch_id = 0
 
     def _eval(self, context):
+        """
+        Runing evaluation.
+        """
         results, names = context.run_eval_graph()
         for name, result in zip(names, results):
             if name not in context.eval_results:
@@ -359,7 +428,9 @@ class CompressPass(object):
             context.eval_results[name].append(result)
 
     def run(self):
-
+        """
+        Execute compressiong pass.
+        """
         context = Context(
             place=self.place,
             train_graph=self.train_graph,

@@ -184,10 +184,10 @@ class GraphWrapper(object):
             program(framework.Program): A program with 
             in_nodes(dict): A dict to indicate the input nodes of the graph.
                             The key is user-defined and human-readable name.
-                            The value is the name of IrVarNode or Variable.
+                            The value is the name of Variable.
             out_nodes(dict): A dict to indicate the input nodes of the graph.
                             The key is user-defined and human-readable name.
-                            The value is the name of IrVarNode or Variable.
+                            The value is the name of Variable.
         """
         super(GraphWrapper, self).__init__()
         self.program = Program() if program is None else program
