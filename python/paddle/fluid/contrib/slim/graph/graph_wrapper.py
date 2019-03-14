@@ -208,6 +208,29 @@ class GraphWrapper(object):
                 params.append(VarWrapper(param))
         return params
 
+        def compile(self, for_parallel=True):
+            """
+            Compile the program in this wrapper to framework.CompiledProgram for next running.
+            This function must be called if the program is modified.
+            Args:
+                for_parallel(bool): Whether the program to run in data parallel way.
+            """
+            target = self.program
+            if self.for_test:
+                loss = None
+            else:
+                loss = self.out_nodes['loss']
+            if for_parallel:
+                # disable memory optimize for stable training
+                build_strategy = compiler.BuildStrategy()
+                build_strategy.enable_inplace = False
+                build_strategy.memory_optimize = False
+                self.compiled_graph = compiler.CompiledProgram(
+                    target).with_data_parallel(
+                        loss_name=loss, build_strategy=build_strategy)
+            else:
+                self.compiled_graph = compiler.CompiledProgram(target)
+
     def ops(self):
         """
         Return all operator nodes included in the graph as a set.

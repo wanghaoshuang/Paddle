@@ -19,7 +19,7 @@ from .... import Program
 from .... import program_guard
 from .... import regularizer
 
-__all__ = ['FSPDistiller', 'L2Distiller']
+__all__ = ['FSPDistiller', 'L2Distiller', 'CrossEntropyDistiller']
 
 
 class L2Distiller(object):
@@ -128,3 +128,53 @@ class FSPDistillerPass(object):
 
     def _fsp_matrix(self, fea_map_0, fea_map_1):
         return layers.fsp_matrix(fea_map_0, fea_map_1)
+
+
+class CrossEntropyDistiller(object):
+    def __init__(self,
+                 student_feature_map=None,
+                 teacher_feature_map=None,
+                 distillation_loss_weight=1):
+        self.student_feature_map = student_feature_map
+        self.teacher_feature_map = teacher_feature_map
+        self.distillation_loss_weight = distillation_loss_weight
+
+    def distiller_loss(self, graph):
+        """
+        Generate distillation training graph.
+        """
+        distiller_pass = CrossEntropyPass(self.student_feature_map,
+                                          self.teacher_feature_map,
+                                          self.distillation_loss_weight)
+        dis_graph = distiller_pass.apply(graph)
+        return dis_graph
+
+
+class CrossEntropyDistillerPass(object):
+    def __init__(self,
+                 student_feature_map,
+                 teacher_feature_map,
+                 distillation_loss_weight=1):
+        self.student_feature_map = student_feature_map
+        self.teacher_feature_map = teacher_feature_map
+        self.distillation_loss_weight = distillation_loss_weight
+
+    def apply(self, graph):
+        ret_graph = graph
+        with program_guard(ret_graph.program):
+
+            student_feature_map = ret_graph.get_var(self.student_feature_map)
+            teacher_feature_map = ret_graph.get_var(self.teacher_feature_map)
+
+            ce_loss = layers.cross_entropy(
+                student_feature_map, teacher_feature_map, soft_label=True)
+
+            distillation_loss = ce_loss * self.distillation_loss_weight
+            student_loss = ret_graph.get_var(ret_graph.out_nodes['loss'])
+            loss = distillation_loss + student_loss
+
+            ret_graph.out_nodes[
+                'cross_entropy_loss_' + self.student_feature_map + "_" +
+                self.teacher_feature_map] = distillation_loss.name
+            ret_graph.out_nodes['loss'] = loss.name
+        return ret_graph
