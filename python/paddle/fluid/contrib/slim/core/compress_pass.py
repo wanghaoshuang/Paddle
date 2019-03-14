@@ -178,7 +178,8 @@ class Context(object):
         assert self.eval_graph is not None
         assert self.eval_reader is not None
         eval_graph = self.eval_graph.clone(for_test=True)
-        executor = get_executor(eval_graph, self.place)
+
+        executor = SlimGraphExecutor(self.place)
         results = []
         batch_id = 0
         s_time = time.time()
@@ -312,7 +313,7 @@ class CompressPass(object):
         Load model that has been compressed. 
         """
         if self.init_model and os.path.exists(self.init_model):
-            exe = get_executor(context.train_graph, context.place)
+            exe = SlimGraphExecutor(context.place)
             load_persistables(context.train_graph, self.init_model, exe)
             update_param_shape(context.eval_graph)
             update_depthwise_conv(context.eval_graph)
@@ -348,7 +349,7 @@ class CompressPass(object):
                         strategies = pickle.load(strategy_file)
 
                 if os.path.exists(model_path):
-                    exe = get_executor(context.optimize_graph, context.place)
+                    exe = SlimGraphExecutor(context.place)
                     with scope_guard(context.scope):
                         context.optimize_graph.load_persistables(model_path,
                                                                  exe)
@@ -371,7 +372,7 @@ class CompressPass(object):
             strategy_path = os.path.join(checkpoint_path, 'strategies')
             if not os.path.isdir(model_path):
                 os.makedirs(model_path)
-            exe = get_executor(context.optimize_graph, context.place)
+            exe = SlimGraphExecutor(context.place)
             save_persistables(context.optimize_graph, model_path, exe)
             context.to_file(context_path)
             with open(strategy_path, 'wb') as strategy_file:
@@ -389,7 +390,7 @@ class CompressPass(object):
             '-----------------------Training epoch-{}; current lr: {:.5f}-----------------------'.
             format(context.epoch_id, current_lr))
 
-        executor = get_executor(context.optimize_graph, self.place)
+        executor = SlimGraphExecutor(self.place)
 
         feed_reader = feed_reader(
             context.train_reader,

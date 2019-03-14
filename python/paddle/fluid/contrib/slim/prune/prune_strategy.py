@@ -910,7 +910,8 @@ class SensitivePruneStrategy(PruneStrategy):
             self._prune_graph(context.eval_graph, context.optimize_graph)
             context.optimize_graph._update_groups_of_conv()
             context.eval_graph._update_groups_of_conv()
-
+            context.optimize_graph.compile()  # to update the compiled program
+            context.eval_graph.compile()  # to update the compiled program
             logger.info(
                 '------------------finish pruning--------------------------------'
             )
