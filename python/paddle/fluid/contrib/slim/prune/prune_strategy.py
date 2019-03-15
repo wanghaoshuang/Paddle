@@ -15,7 +15,6 @@
 from ..core.strategy import Strategy
 from ....framework import Program, program_guard, Parameter
 from .... import layers
-from ..graph import get_executor
 import prettytable as pt
 import numpy as np
 from scipy.optimize import leastsq
@@ -185,7 +184,7 @@ class PruneStrategy(Strategy):
             visited[op.idx()] = False
         stack = []
         for op in graph.ops():
-            if (not op.is_bwd_op()) and (param in op.inputs()):
+            if (not op.is_bwd_op()) and (param in op.all_inputs()):
                 stack.append(op)
         visit_path = []
         while len(stack) > 0:
@@ -194,7 +193,7 @@ class PruneStrategy(Strategy):
                 visit_path.append(top_op)
                 visited[top_op.idx()] = True
             next_ops = None
-            if top_op.type() == "conv2d" and param not in top_op.inputs():
+            if top_op.type() == "conv2d" and param not in top_op.all_inputs():
                 next_ops = None
             elif top_op.type() == "mul":
                 next_ops = None
@@ -234,9 +233,9 @@ class PruneStrategy(Strategy):
         """
         assert isinstance(param, VarWrapper)
         params = []
-        for op in param.outputs():
+        for op in param.all_outputs():
             if op.is_opt_op():
-                for out_var in op.outputs():
+                for out_var in op.all_outputs():
                     if graph.is_persistable(out_var) and out_var.name(
                     ) != param.name():
                         params.append(out_var)
@@ -295,8 +294,8 @@ class PruneStrategy(Strategy):
         corrected_idxs = pruned_idxs[:]
 
         for idx, op in enumerate(related_ops):
-            if op.type() == "conv2d" and (param not in op.inputs()):
-                for in_var in op.inputs():
+            if op.type() == "conv2d" and (param not in op.all_inputs()):
+                for in_var in op.all_inputs():
                     if graph.is_parameter(in_var):
                         conv_param = in_var
                         self._prune_parameter_by_idx(
@@ -308,7 +307,7 @@ class PruneStrategy(Strategy):
                             lazy=lazy,
                             only_graph=only_graph)
             if op.type() == "depthwise_conv2d":
-                for in_var in op.inputs():
+                for in_var in op.all_inputs():
                     if graph.is_parameter(in_var):
                         conv_param = in_var
                         self._prune_parameter_by_idx(
@@ -321,7 +320,7 @@ class PruneStrategy(Strategy):
                             only_graph=only_graph)
             elif op.type() == "elementwise_add":
                 # pruning bias
-                for in_var in op.inputs():
+                for in_var in op.all_inputs():
                     if graph.is_parameter(in_var):
                         bias_param = in_var
                         self._prune_parameter_by_idx(
@@ -335,7 +334,7 @@ class PruneStrategy(Strategy):
             elif op.type() == "mul":  # pruning fc layer
                 fc_input = None
                 fc_param = None
-                for in_var in op.inputs():
+                for in_var in op.all_inputs():
                     if graph.is_parameter(in_var):
                         fc_param = in_var
                     else:
@@ -356,9 +355,9 @@ class PruneStrategy(Strategy):
                     only_graph=only_graph)
 
             elif op.type() == "concat":
-                concat_inputs = op.inputs()
+                concat_inputs = op.all_inputs()
                 last_op = related_ops[idx - 1]
-                for out_var in last_op.outputs():
+                for out_var in last_op.all_outputs():
                     if out_var in concat_inputs:
                         concat_idx = concat_inputs.index(out_var)
                 offset = 0
@@ -366,7 +365,7 @@ class PruneStrategy(Strategy):
                     offset += concat_inputs[ci].shape[1]
                 corrected_idxs = [x + offset for x in pruned_idxs]
             elif op.type() == "batch_norm":
-                bn_inputs = op.inputs()
+                bn_inputs = op.all_inputs()
                 mean = bn_inputs[2]
                 variance = bn_inputs[3]
                 alpha = bn_inputs[0]
@@ -911,7 +910,9 @@ class SensitivePruneStrategy(PruneStrategy):
             context.optimize_graph._update_groups_of_conv()
             context.eval_graph._update_groups_of_conv()
             context.optimize_graph.compile()  # to update the compiled program
-            context.eval_graph.compile()  # to update the compiled program
+            context.eval_graph.compile(
+                for_parallel=False,
+                for_test=True)  # to update the compiled program
             logger.info(
                 '------------------finish pruning--------------------------------'
             )

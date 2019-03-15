@@ -17,9 +17,7 @@ from .graph import *
 from .prune import *
 from .distillation import *
 __all__ = [
-    'build_compressor',
-    'CompressPass',
-    'ImitationGraph',
+    'GraphWrapper',
     'SensitivePruneStrategy',
     'MagnitudePruner',
     'RatioPruner',

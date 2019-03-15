@@ -15,7 +15,7 @@
 from ....compiler import CompiledProgram
 from ....data_feeder import DataFeeder
 from .... import executor
-from . import GraphWrapper
+from .graph_wrapper import GraphWrapper
 
 __all__ = ['SlimGraphExecutor']
 

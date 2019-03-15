@@ -15,6 +15,7 @@
 import collections
 from collections import OrderedDict
 from .... import io
+from .... import compiler
 from ....framework import Program
 from ....framework import program_guard
 from ....framework import Parameter
@@ -87,8 +88,10 @@ class VarWrapper(object):
 
 
 class OpWrapper(object):
-    def __init__(self, op):
+    def __init__(self, op, graph):
+        assert isinstance(graph, GraphWrapper)
         self._op = op
+        self._graph = graph
 
     def __eq__(self, op):
         """
@@ -96,7 +99,7 @@ class OpWrapper(object):
         """
         return self.idx() == op.idx()
 
-    def inputs(self):
+    def all_inputs(self):
         """
         Get all the input variables of this operator.
         """
@@ -104,7 +107,7 @@ class OpWrapper(object):
             self._graph.var(var_name) for var_name in self._op.input_arg_names
         ]
 
-    def outputs(self):
+    def all_outputs(self):
         """
         Get all the output variables of this operator.
         """
@@ -116,13 +119,13 @@ class OpWrapper(object):
         """
         Get the id of this operator.
         """
-        return self._op.idx()
+        return self._op.idx
 
     def type(self):
         """
         Get the type of this operator.
         """
-        return self._op.type()
+        return self._op.type
 
     def is_bwd_op(self):
         """
@@ -140,13 +143,13 @@ class OpWrapper(object):
         """
         Get all the varibales by the input name.
         """
-        self._op.input(name)
+        return [self._graph.var(var_name) for var_name in self._op.input(name)]
 
     def outputs(self, name):
         """
         Get all the varibales by the output name.
         """
-        self._op.output(name)
+        return [self._graph.var(var_name) for var_name in self._op.output(name)]
 
     def set_attr(self, key, value):
         """
@@ -169,7 +172,7 @@ class OpWrapper(object):
             bool|int|str|float|list: The attribute value. The return value
             can be any valid attribute type.
         """
-        self._op.attr(name)
+        return self._op.attr(name)
 
 
 class GraphWrapper(object):
@@ -205,31 +208,40 @@ class GraphWrapper(object):
         params = []
         for block in self.program.blocks:
             for param in block.all_parameters():
-                params.append(VarWrapper(param))
+                params.append(VarWrapper(param, self))
         return params
 
-        def compile(self, for_parallel=True):
-            """
-            Compile the program in this wrapper to framework.CompiledProgram for next running.
-            This function must be called if the program is modified.
-            Args:
-                for_parallel(bool): Whether the program to run in data parallel way.
-            """
-            target = self.program
-            if self.for_test:
-                loss = None
-            else:
-                loss = self.out_nodes['loss']
-            if for_parallel:
-                # disable memory optimize for stable training
-                build_strategy = compiler.BuildStrategy()
-                build_strategy.enable_inplace = False
-                build_strategy.memory_optimize = False
-                self.compiled_graph = compiler.CompiledProgram(
-                    target).with_data_parallel(
-                        loss_name=loss, build_strategy=build_strategy)
-            else:
-                self.compiled_graph = compiler.CompiledProgram(target)
+    def is_parameter(self, var):
+        """
+        Whether the given variable is parameter.
+        Args:
+            var(VarWrapper): The given varibale.
+        """
+        return isinstance(var._var, Parameter)
+
+    def compile(self, for_parallel=True, for_test=False):
+        """
+        Compile the program in this wrapper to framework.CompiledProgram for next running.
+        This function must be called if the program is modified.
+        Args:
+            for_parallel(bool): Whether the program to run in data parallel way. default: True.
+            for_test(bool): Whether the compiled program is used for test.
+        """
+        target = self.program
+        if for_test:
+            loss = None
+        else:
+            loss = self.out_nodes['loss']
+        if for_parallel:
+            # disable memory optimize for stable training
+            build_strategy = compiler.BuildStrategy()
+            build_strategy.enable_inplace = False
+            build_strategy.memory_optimize = False
+            self.compiled_graph = compiler.CompiledProgram(
+                target).with_data_parallel(
+                    loss_name=loss, build_strategy=build_strategy)
+        else:
+            self.compiled_graph = compiler.CompiledProgram(target)
 
     def ops(self):
         """
@@ -238,14 +250,20 @@ class GraphWrapper(object):
         ops = []
         for block in self.program.blocks:
             for op in block.ops:
-                ops.append(OpWrapper(op))
+                ops.append(OpWrapper(op, self))
         return ops
+
+    def vars(self):
+        """
+        Get all the variables.
+        """
+        return [VarWrapper(var, self) for var in self.program.list_vars()]
 
     def var(self, name):
         """
         Get the variable by variable name.
         """
-        return self.program.global_block().var(name)
+        return VarWrapper(self.program.global_block().var(name), self)
 
     def clone(self, for_test=False):
         """
@@ -254,7 +272,7 @@ class GraphWrapper(object):
             (GraphWrapper): The wrapper of a new graph.
         """
         return GraphWrapper(
-            self.program.clone(for_test), self.scope,
+            self.program.clone(for_test),
             copy.deepcopy(self.in_nodes), copy.deepcopy(self.out_nodes))
 
     def merge(self, graph):
@@ -273,12 +291,12 @@ class GraphWrapper(object):
             attrs = {}
             for input_name in op.input_names:
                 inputs[input_name] = [
-                    self.get_var(in_var_name)
+                    self.var(in_var_name)
                     for in_var_name in op.input(input_name)
                 ]
             for output_name in op.output_names:
                 outputs[output_name] = [
-                    self.get_var(out_var_name)
+                    self.var(out_var_name)
                     for out_var_name in op.output(output_name)
                 ]
             for attr_name in op.attr_names:
@@ -302,8 +320,8 @@ class GraphWrapper(object):
         """
         ops = []
         for p in self.ops():
-            for in_var in op.inputs():
-                if in_var in p.outputs():
+            for in_var in op.all_inputs():
+                if in_var in p.all_outputs():
                     ops.append(p)
         return ops
 
@@ -317,8 +335,8 @@ class GraphWrapper(object):
         """
         ops = []
         for p in self.ops():
-            for out_var in op.outputs:
-                if out_var in p.inputs:
+            for out_var in op.all_outputs():
+                if out_var in p.all_inputs():
                     ops.append(p)
         return ops
 
@@ -328,7 +346,7 @@ class GraphWrapper(object):
         """
         assert isinstance(op, OpWrapper)
         params = []
-        for var in op.inputs:
+        for var in op.inputs():
             if isinstance(var._var, Parameter):
                 params.append(var)
         assert len(params) > 0
@@ -343,13 +361,14 @@ class GraphWrapper(object):
             ret += np.product(param.shape())
         return ret
 
-    def get_optimize_graph(self, optimizer, place, scope):
+    def get_optimize_graph(self, optimizer, place, scope, no_grad_var_names=[]):
         """
         Get a new graph for training by appending some backward operators and optimization operators.
         Args:
             optimizer: The optimzier used to generate training graph.
             place: The place to run the graph.
             scope: The scope used to run the graph. Some new variable will be added into this scope.
+            no_grad_var_names(list<str>): Names of variables that should be ignored while computing gradients. default: [].
         Returns:
             (GraphWrapper): The wrapper of new graph with backward ops and optimization ops. 
         """
@@ -362,8 +381,8 @@ class GraphWrapper(object):
                 target_name = graph.out_nodes['loss']
             elif 'cost' in graph.out_nodes:
                 target_name = graph.out_nodes['cost']
-            target = graph.get_var(target_name)
-            optimizer.minimize(target)
+            target = graph.var(target_name)._var
+            optimizer.minimize(target, no_grad_set=no_grad_var_names)
 
         exe = Executor(place)
         exe.run(program=startup_program, scope=scope)
@@ -376,35 +395,35 @@ class GraphWrapper(object):
         flops = 0
         for op in self.ops():
             if op.type() in ['conv2d', 'depthwise_conv2d']:
-                filter_shape = op.input("Filter")[0].shape()
-                input_shape = op.input("Input")[0].shape()
-                output_shape = op.output("Output")[0].shape()
+                filter_shape = op.inputs("Filter")[0].shape()
+                input_shape = op.inputs("Input")[0].shape()
+                output_shape = op.outputs("Output")[0].shape()
                 c_out, c_in, k_h, k_w = filter_shape
                 _, _, h_out, w_out = output_shape
                 groups = op.attr("groups")
                 kernel_ops = k_h * k_w * (c_in / groups)
-                if len(op.input("Bias")) > 0:
+                if len(op.inputs("Bias")) > 0:
                     with_bias = 1
                 else:
                     with_bias = 0
                 flops += 2 * h_out * w_out * c_out * (kernel_ops + with_bias)
 
             elif op.type() == 'pool2d':
-                input_shape = op.input("X")[0].shape()
-                output_shape = op.output("Out")[0].shape()
+                input_shape = op.inputs("X")[0].shape()
+                output_shape = op.outputs("Out")[0].shape()
                 _, c_out, h_out, w_out = output_shape
                 k_size = op.attr("ksize")
                 flops += h_out * w_out * c_out * (k_size[0]**2)
 
-            elif op.op().type() == 'mul':
-                x_shape = op.input("X")[0].shape()
-                y_shape = op.input("Y")[0].shape()
+            elif op.type() == 'mul':
+                x_shape = list(op.inputs("X")[0].shape())
+                y_shape = op.inputs("Y")[0].shape()
                 if x_shape[0] == -1:
                     x_shape[0] = 1
                 flops += 2 * x_shape[0] * x_shape[1] * y_shape[1]
 
             elif op.type() in ['relu', 'sigmoid', 'batch_norm']:
-                input_shape = op.input("X")[0].shape()
+                input_shape = list(op.inputs("X")[0].shape())
                 if input_shape[0] == -1:
                     input_shape[0] = 1
                 flops += np.product(input_shape)

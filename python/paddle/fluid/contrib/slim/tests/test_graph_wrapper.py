@@ -79,19 +79,15 @@ class TestGraphWrapper(unittest.TestCase):
 
     def test_all_parameters(self):
         self.build_program()
-        self.assertEquals(len(self.train_graph.all_parameters()), 48)
+        self.assertEquals(len(self.train_graph.all_parameters()), 24)
 
     def test_all_vars(self):
         self.build_program()
-        self.assertEquals(len(self.train_graph.all_vars()), 133)
-
-    def test_all_persistables(self):
-        self.build_program()
-        self.assertEquals(len(self.train_graph.all_persistables()), 49)
+        self.assertEquals(len(self.train_graph.vars()), 88)
 
     def test_numel_params(self):
         self.build_program()
-        self.assertEquals(self.train_graph.numel_params(), 26516)
+        self.assertEquals(self.train_graph.numel_params(), 13258)
 
     def test_compile(self):
         self.build_program()
@@ -107,7 +103,7 @@ class TestGraphWrapper(unittest.TestCase):
 
     def test_pre_and_next_ops(self):
         self.build_program()
-        for op in self.train_graph.ir_graph.all_op_nodes():
+        for op in self.train_graph.ops():
             for next_op in self.train_graph.next_ops(op):
                 self.assertTrue(op in self.train_graph.pre_ops(next_op))
 
@@ -116,9 +112,7 @@ class TestGraphWrapper(unittest.TestCase):
         opt = fluid.optimizer.SGD(learning_rate=0.001)
         train_graph = self.eval_graph.get_optimize_graph(
             opt, fluid.CUDAPlace(0), self.scope, no_grad_var_names=['image'])
-        self.assertEquals(
-            len(self.train_graph.ir_graph.all_op_nodes()),
-            len(train_graph.ir_graph.all_op_nodes()))
+        self.assertEquals(len(self.train_graph.ops()), len(train_graph.ops()))
         exe = fluid.Executor(fluid.CUDAPlace(0))
         train_graph.compile()
         image = np.random.randint(0, 225, [3, 1, 8, 8]).astype('float32')
