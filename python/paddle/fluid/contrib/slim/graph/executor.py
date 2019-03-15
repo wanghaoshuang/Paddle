@@ -23,8 +23,9 @@ __all__ = ['SlimGraphExecutor']
 class SlimGraphExecutor(object):
     def __init__(self, place):
         self.exe = executor.Executor(place)
+        self.place = place
 
-    def run(self, graph, data=None, feed=None, fetches=None):
+    def run(self, graph, scope, data=None, feed=None, fetches=None):
         assert isinstance(graph, GraphWrapper)
         if data is not None:
             feeder = DataFeeder(
@@ -36,7 +37,7 @@ class SlimGraphExecutor(object):
         fetch_list = fetches if fetches else graph.out_nodes.values()
         program = graph.compiled_graph if graph.compiled_graph else graph.program
         results = self.exe.run(program,
-                               scope=graph.scope,
+                               scope=scope,
                                fetch_list=fetch_list,
                                feed=feed)
         return results

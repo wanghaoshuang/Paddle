@@ -20,7 +20,7 @@ class Strategy(object):
     Base class for all strategies.
     """
 
-    def __init__(self, start_epoch=0, end_epoch=10):
+    def __init__(self, start_epoch=0, end_epoch=0):
         """
         Args:
             start_epoch: The first epoch to apply the strategy.

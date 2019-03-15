@@ -1,4 +1,4 @@
-# Copyright (c) 2018 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2019 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -28,7 +28,18 @@ import numpy as np
 import pickle
 import os
 
-__all__ = ['GraphWrapper', ]
+__all__ = ['GraphWrapper', 'VarWrapper', 'OpWrapper']
+
+OPTIMIZER_OPS = [
+    'momentum',
+    'lars_momentum',
+    'adagrad',
+    'adam',
+    'adamax',
+    'decayed_adagrad',
+    'adadelta',
+    'rmsprop',
+]
 
 
 class VarWrapper(object):
@@ -70,7 +81,7 @@ class VarWrapper(object):
         """
         ops = []
         for op in self._graph.ops():
-            if self in op.inputs():
+            if self in op.all_inputs():
                 ops.append(op)
         return ops
 
@@ -82,7 +93,7 @@ class VarWrapper(object):
         """
         ops = []
         for op in self._graph.ops():
-            if self in op.outputs():
+            if self in op.all_outputs():
                 ops.append(op)
         return ops
 
@@ -219,6 +230,14 @@ class GraphWrapper(object):
         """
         return isinstance(var._var, Parameter)
 
+    def is_persistable(self, var):
+        """
+        Whether the given variable is persistable.
+        Args:
+            var(VarWrapper): The given varibale.
+        """
+        return var._var.persistable
+
     def compile(self, for_parallel=True, for_test=False):
         """
         Compile the program in this wrapper to framework.CompiledProgram for next running.
@@ -292,7 +311,7 @@ class GraphWrapper(object):
             for input_name in op.input_names:
                 inputs[input_name] = [
                     self.var(in_var_name)
-                    for in_var_name in op.input(input_name)
+                    for in_var_name in op.inputs(input_name)
                 ]
             for output_name in op.output_names:
                 outputs[output_name] = [
@@ -346,7 +365,7 @@ class GraphWrapper(object):
         """
         assert isinstance(op, OpWrapper)
         params = []
-        for var in op.inputs():
+        for var in op.all_inputs():
             if isinstance(var._var, Parameter):
                 params.append(var)
         assert len(params) > 0
@@ -437,7 +456,7 @@ class GraphWrapper(object):
             path(str): The path to save the persistables.
             exe(framework.Executor): The executor used to save the persistables.
         """
-        io.save_persistables(exe, path, main_program=self.program)
+        io.save_persistables(exe.exe, path, main_program=self.program)
 
     def load_persistables(self, path, exe):
         """
@@ -475,4 +494,4 @@ class GraphWrapper(object):
     def update_groups_of_conv(self):
         for op in self.ops():
             if op.type() == 'depthwise_conv2d':
-                op.set_attr('groups', op.input('Filter')[0].shape()[0])
+                op.set_attr('groups', op.inputs('Filter')[0].shape()[0])

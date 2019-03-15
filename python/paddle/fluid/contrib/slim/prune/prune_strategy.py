@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from ..core.strategy import Strategy
+from ..graph import VarWrapper, OpWrapper, GraphWrapper
 from ....framework import Program, program_guard, Parameter
 from .... import layers
 import prettytable as pt
@@ -40,15 +41,15 @@ class PruneStrategy(Strategy):
     def __init__(self,
                  pruner=None,
                  start_epoch=0,
-                 end_epoch=10,
+                 end_epoch=0,
                  target_ratio=0.5,
                  metric_name=None,
                  pruned_params='conv.*_weights'):
         """
         Args:
             pruner(slim.Pruner): The pruner used to prune the parameters.
-            start_epoch(int): The 'on_epoch_begin' function will be called in start_epoch.
-            end_epoch(int): The 'on_epoch_end' function will be called in end_epoch.
+            start_epoch(int): The 'on_epoch_begin' function will be called in start_epoch. default: 0
+            end_epoch(int): The 'on_epoch_end' function will be called in end_epoch. default: 0
             target_ratio(float): The flops ratio to be pruned from current model.
             metric_name(str): The metric used to evaluate the model.
                          It should be one of keys in out_nodes of graph wrapper.
@@ -114,7 +115,7 @@ class PruneStrategy(Strategy):
                     param.shape())
             new_shape = list(param.shape())
             new_shape[0] = pruned_param.shape[0]
-            param.desc.set_shape(new_shape)
+            param.set_shape(new_shape)
             logger.debug(
                 '|----------------------------------------+----+------------------------------+------------------------------|'
             )
@@ -161,7 +162,7 @@ class PruneStrategy(Strategy):
                     param.shape())
             new_shape = list(param.shape())
             new_shape[pruned_axis] = pruned_param.shape[pruned_axis]
-            param.desc.set_shape(new_shape)
+            param.set_shape(new_shape)
             logger.debug(
                 '|----------------------------------------+----+------------------------------+------------------------------|'
             )
@@ -233,7 +234,7 @@ class PruneStrategy(Strategy):
         """
         assert isinstance(param, VarWrapper)
         params = []
-        for op in param.all_outputs():
+        for op in param.outputs():
             if op.is_opt_op():
                 for out_var in op.all_outputs():
                     if graph.is_persistable(out_var) and out_var.name(
@@ -265,7 +266,7 @@ class PruneStrategy(Strategy):
                               False means modifying graph and variables in  scope.
         """
         assert isinstance(
-            grap,
+            graph,
             GraphWrapper), "graph must be instance of slim.core.GraphWrapper"
         assert isinstance(
             param, VarWrapper), "param must be instance of slim.core.VarWrapper"
@@ -341,7 +342,7 @@ class PruneStrategy(Strategy):
                         fc_input = in_var
 
                 idx = []
-                feature_map_size = fc_input.shape[2] * fc_input.shape[3]
+                feature_map_size = fc_input.shape()[2] * fc_input.shape()[3]
                 range_idx = np.array(range(feature_map_size))
                 for i in corrected_idxs:
                     idx += list(range_idx + i * feature_map_size)
@@ -362,7 +363,7 @@ class PruneStrategy(Strategy):
                         concat_idx = concat_inputs.index(out_var)
                 offset = 0
                 for ci in range(concat_idx):
-                    offset += concat_inputs[ci].shape[1]
+                    offset += concat_inputs[ci].shape()[1]
                 corrected_idxs = [x + offset for x in pruned_idxs]
             elif op.type() == "batch_norm":
                 bn_inputs = op.all_inputs()
@@ -412,7 +413,7 @@ class PruneStrategy(Strategy):
         Args:
             graph(GraphWrapper): The graph to be searched.
             scope(fluid.core.Scope): The scope storing paramaters to be pruned.
-            params(list<VarWrapper>): A list of parameters to be pruned.
+            params(list<str>): A list of parameter names to be pruned.
             ratios(list<float>): A list of ratios to be used to pruning parameters.
             place(fluid.Place): The device place of filter parameters.
             pruned_idx(list): The index of elements to be pruned.
@@ -433,7 +434,7 @@ class PruneStrategy(Strategy):
         assert len(params) == len(ratios)
         self.pruned_list = [[], []]
         for param, ratio in zip(params, ratios):
-            assert isinstance(param, str)
+            assert isinstance(param, str) or isinstance(param, unicode)
             param = graph.var(param)
             self._forward_pruning_ralated_params(
                 graph,
@@ -443,7 +444,7 @@ class PruneStrategy(Strategy):
                 ratio=ratio,
                 lazy=lazy,
                 only_graph=only_graph)
-            ops = graph.get_ops_by_param(param)
+            ops = param.outputs()
             for op in ops:
                 if op.type() == 'conv2d':
                     brother_ops = self._search_brother_ops(graph, op)
@@ -533,15 +534,15 @@ class UniformPruneStrategy(PruneStrategy):
     def __init__(self,
                  pruner=None,
                  start_epoch=0,
-                 end_epoch=10,
+                 end_epoch=0,
                  target_ratio=0.5,
                  metric_name=None,
                  pruned_params='conv.*_weights'):
         """
         Args:
             pruner(slim.Pruner): The pruner used to prune the parameters.
-            start_epoch(int): The 'on_epoch_begin' function will be called in start_epoch.
-            end_epoch(int): The 'on_epoch_end' function will be called in end_epoch.
+            start_epoch(int): The 'on_epoch_begin' function will be called in start_epoch. default: 0
+            end_epoch(int): The 'on_epoch_end' function will be called in end_epoch. default: 0
             target_ratio(float): The flops ratio to be pruned from current model.
             metric_name(str): The metric used to evaluate the model.
                          It should be one of keys in out_nodes of graph wrapper.
@@ -559,7 +560,7 @@ class UniformPruneStrategy(PruneStrategy):
         pruned_params = []
         for param in context.eval_graph.all_parameters():
             if re.match(self.pruned_params, param.name()):
-                pruned_params.append(param)
+                pruned_params.append(param.name)
 
         min_ratio = 0.
         max_ratio = 1.
@@ -574,7 +575,7 @@ class UniformPruneStrategy(PruneStrategy):
             ratios = [ratio] * len(pruned_params)
             self._prune_parameters(
                 context.eval_graph,
-                context.eval_graph.scope,
+                context.scope,
                 pruned_params,
                 ratios,
                 context.place,
@@ -586,8 +587,8 @@ class UniformPruneStrategy(PruneStrategy):
             logger.debug('Pruned flops: {:.2f}'.format(pruned_flops))
             logger.debug('Pruned model size: {:.2f}'.format(pruned_size))
             for param in self.param_shape_backup.keys():
-                context.eval_graph.get_var(param).desc.set_shape(
-                    self.param_shape_backup[param])
+                context.eval_graph.var(param).set_shape(self.param_shape_backup[
+                    param])
             self.param_shape_backup = {}
 
             if abs(pruned_flops - self.target_ratio) < 1e-2:
@@ -603,9 +604,8 @@ class UniformPruneStrategy(PruneStrategy):
         if context.epoch_id == self.start_epoch:
             params, ratios = self._get_best_ratios(context)
 
-            self._prune_parameters(context.optimize_graph,
-                                   context.optimize_graph.scope, params, ratios,
-                                   context.place)
+            self._prune_parameters(context.optimize_graph, context.scope,
+                                   params, ratios, context.place)
 
             model_size = context.eval_graph.numel_params()
             flops = context.eval_graph.flops()
@@ -613,8 +613,8 @@ class UniformPruneStrategy(PruneStrategy):
             logger.debug('#          pruning eval graph    #')
             logger.debug('################################\n')
             self._prune_graph(context.eval_graph, context.optimize_graph)
-            context.optimize_graph._update_groups_of_conv()
-            context.eval_graph._update_groups_of_conv()
+            context.optimize_graph.update_groups_of_conv()
+            context.eval_graph.update_groups_of_conv()
 
             logger.info(
                 '------------------finish pruning--------------------------------'
@@ -638,7 +638,7 @@ class SensitivePruneStrategy(PruneStrategy):
     def __init__(self,
                  pruner=None,
                  start_epoch=0,
-                 end_epoch=10,
+                 end_epoch=0,
                  delta_rate=0.20,
                  target_ratio=0.5,
                  metric_name='top1_acc',
@@ -759,7 +759,7 @@ class SensitivePruneStrategy(PruneStrategy):
                 # prune parameter by ratio
                 self._prune_parameters(
                     context.eval_graph,
-                    context.eval_graph.scope, [param], [ratio],
+                    context.scope, [param], [ratio],
                     context.place,
                     lazy=True)
                 self.pruned_list[0]
@@ -783,8 +783,7 @@ class SensitivePruneStrategy(PruneStrategy):
 
                 # restore pruned parameters
                 for param_name in self.backup.keys():
-                    param_t = context.eval_graph.scope.find_var(
-                        param_name).get_tensor()
+                    param_t = context.scope.find_var(param_name).get_tensor()
                     param_t.set(self.backup[param_name], context.place)
 
 #                pruned_metric = self._eval_graph(context)
@@ -797,7 +796,8 @@ class SensitivePruneStrategy(PruneStrategy):
         """
         Search a group of ratios for pruning target flops.
         """
-        logger.info('_get_best_ratios')
+        logger.info('_get_best_ratios for pruning ratie: {}'.format(
+            target_ratio))
         self.param_shape_backup = {}
         self.backup = {}
 
@@ -833,7 +833,7 @@ class SensitivePruneStrategy(PruneStrategy):
         while min_loss < max_loss:
             loss = (max_loss + min_loss) / 2
             logger.info(
-                '-----------Try pruned ratios while acc loss={:.2f}-----------'.
+                '-----------Try pruned ratios while acc loss={:.4f}-----------'.
                 format(loss))
             ratios = []
             # step 2.1: Get ratios according to current loss
@@ -847,11 +847,11 @@ class SensitivePruneStrategy(PruneStrategy):
                         selected_root = min(root.real, min_root)
                 ratios.append(selected_root)
             logger.info('Pruned ratios={}'.format(
-                [round(ratio, 2) for ratio in ratios]))
+                [round(ratio, 3) for ratio in ratios]))
             # step 2.2: Pruning by current ratios
             self._prune_parameters(
                 context.eval_graph,
-                context.eval_graph.scope,
+                context.scope,
                 sensitivities.keys(),
                 ratios,
                 context.place,
@@ -860,15 +860,15 @@ class SensitivePruneStrategy(PruneStrategy):
             pruned_flops = 1 - (float(context.eval_graph.flops()) / flops)
             pruned_size = 1 - (float(context.eval_graph.numel_params()) /
                                model_size)
-            logger.info('Pruned flops: {:.2f}'.format(pruned_flops))
-            logger.info('Pruned model size: {:.2f}'.format(pruned_size))
+            logger.info('Pruned flops: {:.4f}'.format(pruned_flops))
+            logger.info('Pruned model size: {:.4f}'.format(pruned_size))
             for param in self.param_shape_backup.keys():
-                context.eval_graph.get_var(param).desc.set_shape(
-                    self.param_shape_backup[param])
+                context.eval_graph.var(param).set_shape(self.param_shape_backup[
+                    param])
             self.param_shape_backup = {}
 
             # step 2.3: Check whether current ratios is enough
-            if abs(pruned_flops - target_ratio) < 1e-2:
+            if abs(pruned_flops - target_ratio) < 0.02:
                 break
             if pruned_flops > target_ratio:
                 max_loss = loss
@@ -894,9 +894,8 @@ class SensitivePruneStrategy(PruneStrategy):
             sensitivities = self._compute_sensitivities(context)
             params, ratios = self._get_best_ratios(context, sensitivities,
                                                    current_ratio)
-            self._prune_parameters(context.optimize_graph,
-                                   context.optimize_graph.scope, params, ratios,
-                                   context.place)
+            self._prune_parameters(context.optimize_graph, context.scope,
+                                   params, ratios, context.place)
 
             self.param_shape_backup = {}
             self.backup = {}
@@ -907,8 +906,8 @@ class SensitivePruneStrategy(PruneStrategy):
             logger.debug('#          pruning eval graph    #')
             logger.debug('################################')
             self._prune_graph(context.eval_graph, context.optimize_graph)
-            context.optimize_graph._update_groups_of_conv()
-            context.eval_graph._update_groups_of_conv()
+            context.optimize_graph.update_groups_of_conv()
+            context.eval_graph.update_groups_of_conv()
             context.optimize_graph.compile()  # to update the compiled program
             context.eval_graph.compile(
                 for_parallel=False,

@@ -16,6 +16,7 @@ from ....core import CPUPlace
 from .... import compiler
 from .... import io
 from .... import profiler
+from .... import scope_guard
 from ....data_feeder import DataFeeder
 from .....reader import xmap_readers
 from ..graph import *
@@ -191,7 +192,7 @@ class Context(object):
             reader = cached_reader(reader, sampled_rate, self.cache_path,
                                    cached_id)
         for data in reader():
-            result = executor.run(eval_graph, data=data)
+            result = executor.run(eval_graph, self.scope, data=data)
             result = [np.mean(r) for r in result]
             results.append(result)
             if batch_id % 20 == 0:
@@ -262,16 +263,11 @@ class CompressPass(object):
         self.strategies = []
         self.epoch = 0
         self.place = CPUPlace() if place is None else place
-        self.train_graph = ImitationGraph(
-            train_program,
-            scope=scope,
-            in_nodes=train_feed_list,
-            out_nodes=train_fetch_list)
-        self.eval_graph = ImitationGraph(
-            eval_program,
-            scope=scope,
-            in_nodes=eval_feed_list,
-            out_nodes=eval_fetch_list)
+        self.scope = scope
+        self.train_graph = GraphWrapper(
+            train_program, in_nodes=train_feed_list, out_nodes=train_fetch_list)
+        self.eval_graph = GraphWrapper(
+            eval_program, in_nodes=eval_feed_list, out_nodes=eval_fetch_list)
         self.train_reader = train_reader
         self.eval_reader = eval_reader
         self.teacher_graphs = []
@@ -317,10 +313,11 @@ class CompressPass(object):
         """
         if self.init_model and os.path.exists(self.init_model):
             exe = SlimGraphExecutor(context.place)
-            load_persistables(context.train_graph, self.init_model, exe)
-            update_param_shape(context.eval_graph)
-            update_depthwise_conv(context.eval_graph)
-            infer_shape(context.train_graph)
+            with scope_guard(context.scope):
+                context.train_graph.load_persistables(self.init_model, exe)
+            context.eval_graph.update_param_shape(context.scope)
+            context.eval_graph.update_groups_of_conv()
+            context.train_graph.infer_shape()
             logger.info("Init model from: {}".format(self.init_model))
 
     def _load_checkpoint(self, context):
@@ -330,6 +327,8 @@ class CompressPass(object):
         logger.debug('_load_checkpoint')
         strategies = self.strategies
         if self.checkpoint_path:
+            if not os.path.exists(self.checkpoint_path):
+                os.makedirs(self.checkpoint_path)
             checkpoints = [
                 dir for dir in os.listdir(self.checkpoint_path)
                 if os.path.isdir(os.path.join(self.checkpoint_path, dir))
@@ -358,7 +357,7 @@ class CompressPass(object):
                                                                  exe)
                     context.optimize_graph.update_param_shape(context.scope)
                     context.optimize_graph.update_groups_of_conv()
-                    context.eval_graph.update_param_shape()
+                    context.eval_graph.update_param_shape(context.scope)
                     context.eval_graph.update_groups_of_conv()
                     logger.info("Loaded params from: {}".format(model_path))
         return context, strategies
@@ -376,7 +375,8 @@ class CompressPass(object):
             if not os.path.isdir(model_path):
                 os.makedirs(model_path)
             exe = SlimGraphExecutor(context.place)
-            save_persistables(context.optimize_graph, model_path, exe)
+            with scope_guard(context.scope):
+                context.optimize_graph.save_persistables(model_path, exe)
             context.to_file(context_path)
             with open(strategy_path, 'wb') as strategy_file:
                 pickle.dump(self.strategies, strategy_file)
@@ -386,16 +386,10 @@ class CompressPass(object):
         """
         Train one epoch.
         """
-        current_lr = np.array(
-            context.optimize_graph.scope.find_var('learning_rate').get_tensor(
-            ))[0]
-        logger.info(
-            '-----------------------Training epoch-{}; current lr: {:.5f}-----------------------'.
-            format(context.epoch_id, current_lr))
 
         executor = SlimGraphExecutor(self.place)
 
-        feed_reader = feed_reader(
+        reader = feed_reader(
             context.train_reader,
             context.optimize_graph.in_nodes.values(),
             self.place,
@@ -406,10 +400,13 @@ class CompressPass(object):
                 context.optimize_graph.program).with_data_parallel(
                     loss_name=context.optimize_graph.out_nodes['loss'])
 
-        for feed in feed_reader():
+        for feed in reader():
             for strategy in self.strategies:
                 strategy.on_batch_begin(context)
-            results = executor.run(context.optimize_graph, data=None, feed=feed)
+            results = executor.run(context.optimize_graph,
+                                   context.scope,
+                                   data=None,
+                                   feed=feed)
             results = [float(np.mean(result)) for result in results]
             if context.batch_id % 20 == 0:
                 logger.info("epoch:{}; batch_id:{}; {} = {}".format(
@@ -445,7 +442,7 @@ class CompressPass(object):
             teacher_graphs=self.teacher_graphs,
             train_optimizer=self.train_optimizer,
             distiller_optimizer=self.distiller_optimizer)
-
+        self.context = context
         if self.teacher_graphs:
             context.put('teachers', self.teacher_graphs)
         self._init_model(context)
@@ -453,7 +450,7 @@ class CompressPass(object):
             if context.train_optimizer:
                 context.train_optimizer._name = 'train_opt'
                 context.optimize_graph = context.train_graph.get_optimize_graph(
-                    context.train_optimizer, context.place)
+                    context.train_optimizer, context.place, context.scope)
             else:
                 context.optimize_graph = context.train_graph
 
