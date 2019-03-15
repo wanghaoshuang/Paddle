@@ -1,0 +1,17 @@
+version: 1.0
+strategies:
+    quantization_strategy:
+        class: 'QuantizationStrategy'
+        start_epoch: 0
+        end_epoch: 100
+        float_model_save_path: './output/float'
+        mobile_model_save_path: './output/mobile'
+        int8_model_save_path: './output/int8'
+        weight_bits: 8
+        activation_bits: 8
+        activation_quantize_type: 'abs_max'
+compress_pass:
+    epoch: 101
+    checkpoint_path: './checkpoints/'
+    strategies:
+        - quantization_strategy

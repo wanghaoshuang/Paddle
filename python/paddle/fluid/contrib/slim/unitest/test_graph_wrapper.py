@@ -56,6 +56,9 @@ def residual_block(num):
 
 class TestGraphWrapper(unittest.TestCase):
     def build_program(self):
+        place = fluid.CUPPlace()
+        if fluid.core.is_compiled_with_cuda():
+            place = fluid.CUDAPlace(0)
         main = fluid.Program()
         startup = fluid.Program()
         with fluid.program_guard(main, startup):
@@ -64,7 +67,7 @@ class TestGraphWrapper(unittest.TestCase):
             opt = fluid.optimizer.SGD(learning_rate=0.001)
             opt.minimize(self.loss)
         self.scope = core.Scope()
-        exe = fluid.Executor(fluid.CUDAPlace(0))
+        exe = fluid.Executor(place)
         exe.run(startup, scope=self.scope)
         self.eval_graph = GraphWrapper(
             program=eval_program,
@@ -91,7 +94,10 @@ class TestGraphWrapper(unittest.TestCase):
 
     def test_compile(self):
         self.build_program()
-        exe = fluid.Executor(fluid.CUDAPlace(0))
+        place = fluid.CUPPlace()
+        if fluid.core.is_compiled_with_cuda():
+            place = fluid.CUDAPlace(0)
+        exe = fluid.Executor(place)
         self.train_graph.compile()
         exe.run(self.train_graph.compiled_graph,
                 scope=self.scope,
@@ -109,11 +115,14 @@ class TestGraphWrapper(unittest.TestCase):
 
     def test_get_optimize_graph(self):
         self.build_program()
+        place = fluid.CUPPlace()
+        if fluid.core.is_compiled_with_cuda():
+            place = fluid.CUDAPlace(0)
         opt = fluid.optimizer.SGD(learning_rate=0.001)
         train_graph = self.eval_graph.get_optimize_graph(
-            opt, fluid.CUDAPlace(0), self.scope, no_grad_var_names=['image'])
+            opt, place, self.scope, no_grad_var_names=['image'])
         self.assertEquals(len(self.train_graph.ops()), len(train_graph.ops()))
-        exe = fluid.Executor(fluid.CUDAPlace(0))
+        exe = fluid.Executor(place)
         train_graph.compile()
         image = np.random.randint(0, 225, [3, 1, 8, 8]).astype('float32')
         label = np.random.randint(0, 10, [3, 1]).astype('int64')

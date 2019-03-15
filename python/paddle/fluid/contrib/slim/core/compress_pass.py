@@ -88,6 +88,7 @@ class Context(object):
 
     def __init__(self,
                  place,
+                 scope,
                  train_graph=None,
                  train_reader=None,
                  eval_graph=None,
@@ -98,6 +99,7 @@ class Context(object):
         """
         Args:
             place: The device place where the compression job running.
+            scope: The scope used in compression job.
             train_graph: The graph with loss as output node.
             eval_graph: The graph used for evaluation.
             eval_reader: The data reader used for evaluation.
@@ -116,6 +118,7 @@ class Context(object):
         self.k_v = {}
 
         self.place = place
+        self.scope = scope
         self.train_graph = train_graph
         self.train_reader = train_reader
         self.eval_graph = eval_graph
@@ -434,6 +437,7 @@ class CompressPass(object):
         """
         context = Context(
             place=self.place,
+            scope=self.scope,
             train_graph=self.train_graph,
             train_reader=self.train_reader,
             eval_graph=self.eval_graph,
