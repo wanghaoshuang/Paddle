@@ -283,17 +283,25 @@ def xmap_readers(mapper, reader, process_num, buffer_size, order=False):
 
     # define a worker to read samples from reader to in_queue
     def read_worker(reader, in_queue):
-        for i in reader():
-            in_queue.put(i)
-        in_queue.put(end)
+        try:
+            for i in reader():
+                in_queue.put(i)
+        except Exception as e:
+            sys.stderr.write("Reader failed in xmap_reader: " + str(e) + "\n")
+        finally:
+            in_queue.put(end)
 
     # define a worker to read samples from reader to in_queue with order flag
     def order_read_worker(reader, in_queue):
         in_order = 0
-        for i in reader():
-            in_queue.put((in_order, i))
-            in_order += 1
-        in_queue.put(end)
+        try:
+            for i in reader():
+                in_queue.put((in_order, i))
+                in_order += 1
+        except Exception as e:
+            sys.stderr.write("Reader failed in xmap_reader: " + str(e) + "\n")
+        finally:
+            in_queue.put(end)
 
     # define a worker to handle samples from in_queue by mapper
     # and put mapped samples into out_queue
