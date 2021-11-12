@@ -30,7 +30,9 @@ from ....framework import _get_paddle_place
 __all__ = [
     'QuantizationTransformPass', 'QuantizationFreezePass', 'ConvertToInt8Pass',
     'TransformForMobilePass', 'OutScaleForTrainingPass',
-    'OutScaleForInferencePass', 'AddQuantDequantPass'
+    'OutScaleForInferencePass', 'AddQuantDequantPass',
+    'ReplaceFakeQuantDequantPass',
+    'QuantWeightPass',
 ]
 
 _fake_quant_op_list = [
@@ -1991,3 +1993,224 @@ class AddQuantDequantPass(object):
             graph.link_to(quant_op_node, accum_out_node)
 
         return quant_var_node, scale_out_node
+
+
+
+class ReplaceFakeQuantDequantPass(object):
+    def __init__(self, scope, place):
+        self._place = _get_paddle_place(place)
+        self._scope = scope
+        assert self._scope != None, "scope must not be None."
+        assert self._place != None, "place must not be None."
+    def apply(self, graph):
+        assert isinstance(graph,
+                          IrGraph), 'graph must be the instance of IrGraph.'
+        fake_quant_ops = []
+        fake_dequant_ops = []
+
+        for op in graph.all_op_nodes():
+            if op.name() in _fake_quant_op_list:
+                fake_quant_ops.append(op)
+            elif  op.name() in _fake_dequant_op_list:
+                fake_dequant_ops.append(op)
+
+        for _op in fake_quant_ops:
+            self._replace_op(graph, _op, "quantize_linear")
+            graph.safe_remove_nodes(_op)
+
+        for _op in fake_dequant_ops:
+            self._replace_op(graph, _op, "dequantize_linear")
+            graph.safe_remove_nodes(_op)
+
+        graph.resolve_hazard()
+        return graph
+
+    def _replace_op(self, graph, op, target_op_name):
+        assert target_op_name in ["quantize_linear", "dequantize_linear"]
+#        print(f"op name: {op.name()}; op.iputs: {op.inputs[0]}") 
+        x_node = graph._find_node_by_name(op.inputs, op.input("X")[0])
+        out_node = graph._find_node_by_name(op.outputs, op.output("Out")[0])
+        if target_op_name == "quantize_linear":
+            scale_node = graph._find_node_by_name(op.outputs, op.output("OutScale")[0])
+        else:
+            scale_name = "Scales" if op.op().has_attr("quant_axis") else "Scale"
+            scale_node = graph._find_node_by_name(op.inputs, op.input(scale_name)[0])
+        
+        quant_axis = op.op().attr("quant_axis") if op.op().has_attr("quant_axis") else 1
+        bit_length = op.op().attr("bit_length") if op.op().has_attr("bit_length") else None
+
+        zero_point_node = None
+        quanted_node = out_node if target_op_name == "quantize_linear" else x_node
+        if zero_point_node is None:
+            zero_point_node = graph.create_persistable_node(
+                name=self._zero_point_name(quanted_node.name()),
+                var_type=core.VarDesc.VarType.LOD_TENSOR,
+                shape=scale_node.shape(),
+                var_dtype=core.VarDesc.VarType.INT32)
+            _init_var_node(
+                zero_point_node,
+                np.zeros(
+                    scale_node.shape(), dtype="int32"),
+                self._scope,
+                self._place)
+
+        inputs = {"X": x_node, "Scale": scale_node}
+        if zero_point_node is not None:
+            inputs["ZeroPoint"] = zero_point_node
+        quant_op_node = graph.create_op_node(
+            op_type=target_op_name,
+            attrs={"quant_axis": quant_axis,
+                   "bit_length": bit_length},
+            inputs=inputs,
+            outputs={"Y": out_node})
+
+        graph.link_to(x_node, quant_op_node)
+        graph.link_to(scale_node, quant_op_node)
+        if zero_point_node is not None:
+            graph.link_to(zero_point_node, quant_op_node)
+        graph.link_to(quant_op_node, out_node)
+
+
+    def _zero_point_name(self, var_name):
+        """
+        Return the scale name for the var named `var_name`.
+        """
+        return "%s@zero_point" % (var_name)
+
+
+class QuantWeightPass(object):
+    def __init__(self, scope, place, bias_correction=False):
+        self._place = _get_paddle_place(place)
+        self._scope = scope
+        self._bias_correction = bias_correction
+        assert self._scope != None, "scope must not be None."
+        assert self._place != None, "place must not be None."
+    def apply(self, graph):
+        assert isinstance(graph,
+                          IrGraph), 'graph must be the instance of IrGraph.'
+        fake_quant_ops_for_weight = []
+
+        fake_quant_ops = [op for op in graph.all_op_nodes() if op.name() == "quantize_linear"]
+        for _op in fake_quant_ops:
+            x_node = graph._find_node_by_name(_op.inputs, _op.input("X")[0])
+            if x_node.persistable():
+                scale_node = graph._find_node_by_name(_op.inputs, _op.input("Scale")[0])
+                zero_point_node = graph._find_node_by_name(_op.inputs, _op.input("ZeroPoint")[0])
+                out_node = graph._find_node_by_name(_op.outputs, _op.output("Y")[0])
+
+                scale_v = self._load_var(scale_node.name())
+                assert scale_v.ndim in [
+                    1, 2
+                ], "the dim of scale_v should be 1 or 2"
+                if scale_v.ndim == 2:
+                    scale_v = scale_v[0]
+                if scale_v.size == 1 and _op.name() == 'abs_max':
+                    scale_v = scale_v[0]
+                else:
+                    scale_v = scale_v.tolist()
+                param_v = self._load_var(x_node.name())
+                quant_axis = _op.op().attr("quant_axis")
+                bits_length = _op.op().attr("bit_length")
+                quantized_param_v = self._quant(
+                    param_v.copy(), scale_v, bits_length, quant_axis)
+                if self._bias_correction == True:
+                    quantized_param_v = self._bias_correction_w(
+                        param_v, quantized_param_v, scale_v, quant_axis)
+                self._restore_var(x_node.name(), quantized_param_v)
+
+                for next_op_node in out_node.outputs:
+                    graph.update_input_link(out_node, x_node, next_op_node)
+                graph.safe_remove_nodes(out_node)
+                graph.safe_remove_nodes(scale_node)
+                graph.safe_remove_nodes(zero_point_node)
+
+
+    def _load_var(self, name):
+        return np.array(self._scope.find_var(name).get_tensor())
+
+    def _restore_var(self, name, array):
+        tensor = self._scope.find_var(name).get_tensor()
+        tensor.set(array, self._place)
+
+    def _remove_unused_var_nodes(self, graph):
+        all_used_vars = set()
+        ops = graph.all_op_nodes()
+        for op_node in ops:
+            for input_node in op_node.inputs:
+                all_used_vars.add(input_node)
+            for output_node in op_node.outputs:
+                all_used_vars.add(output_node)
+
+        all_used_vars = {n.node for n in all_used_vars}
+        all_unused_vars = {
+            n
+            for n in filter(lambda node: node.node not in all_used_vars,
+                            graph.all_var_nodes())
+        }
+        graph.safe_remove_nodes(all_unused_vars)
+
+    def _quant(self, x, scale, num_bits, quant_axis):
+        assert quant_axis in [0, 1], 'quant_axis should be 0 or 1 for now.'
+        bnt = (1 << (num_bits - 1)) - 1
+
+        def _clip(x, scale):
+            x[x > scale] = scale
+            x[x < -scale] = -scale
+            return x
+
+        if isinstance(scale, list):
+            for i, s in enumerate(scale):
+                if s == 0.0:
+                    s = 1e-8
+                if quant_axis == 0:
+                    x[i] = _clip(x[i], s)
+                    x[i] = np.round(x[i] / s * bnt)
+                else:
+                    x[:, i] = _clip(x[:, i], s)
+                    x[:, i] = np.round(x[:, i] / s * bnt)
+        else:
+            scale = 1e-8 if scale == 0.0 else scale
+            x = _clip(x, scale)
+            x = np.round(x / scale * bnt)
+        return x
+
+    def _bias_correction_w(self, x, x_quant, scale_v, quant_axis):
+        '''
+        Bias correction for weight
+        '''
+        eps = 1e-8
+        bnt = (1 << (self._weight_bits - 1)) - 1
+        x_dequant = x_quant.copy()
+        if isinstance(scale_v, list):
+            if quant_axis == 0:
+                for i, s in enumerate(scale_v):
+                    x_dequant[i] = x_dequant[i] * s / bnt
+                quant_bias = x - x_dequant
+                mean_bias = quant_bias.reshape(quant_bias.shape[0], -1).mean(-1)
+                std_orig = x.reshape(x.shape[0], -1).std(-1)
+                std_quant = x_dequant.reshape(x_dequant.shape[0], -1).std(-1)
+                std_bias = std_orig / (std_quant + eps)
+            else:
+                for i, s in enumerate(scale_v):
+                    x_dequant[:, i] = x_quant[:, i] * s / bnt
+                quant_bias = x - x_dequant
+                mean_bias = np.array([
+                    quant_bias[:, i].mean() for i in range(quant_bias.shape[1])
+                ])
+                std_orig = np.array([x[:, i].std() for i in range(x.shape[1])])
+                std_quant = np.array(
+                    [x_dequant[:, i].std() for i in range(x_dequant.shape[1])])
+                std_bias = std_orig / (std_quant + eps)
+        else:
+            x_dequant = x_quant * scale_v / bnt
+            mean_bias = (x - x_dequant).mean()
+            std_bias = x.std() / (x_dequant.std() + eps)
+        if mean_bias.ndim == 1:
+            std_bias = np.resize(std_bias, x.shape)
+            mean_bias = np.resize(mean_bias, x.shape)
+
+        x_dequant = (mean_bias + x_dequant) * std_bias
+        quantized_param_v = self._quant(x_dequant, scale_v, self._weight_bits,
+                                        quant_axis)
+        return quantized_param_v
+

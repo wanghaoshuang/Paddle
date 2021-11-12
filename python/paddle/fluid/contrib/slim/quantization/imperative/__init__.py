@@ -17,6 +17,9 @@ from __future__ import print_function
 from . import qat
 from .qat import *
 
+from . import qat_v2
+from .qat_v2 import *
+
 from . import ptq
 from .ptq import *
 
@@ -31,6 +34,7 @@ from .ptq_registry import *
 
 __all__ = []
 __all__ += qat.__all__
+__all__ += qat_v2.__all__
 __all__ += ptq.__all__
 __all__ += ptq_config.__all__
 __all__ += ptq_quantizer.__all__

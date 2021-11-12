@@ -14,7 +14,7 @@ limitations under the License. */
 
 #include <algorithm>
 #include <string>
-#include "paddle/fluid/framework/op_version_registry.h"
+#include "paddle/fluid/operators/quantize_linear_op.h"
 
 namespace paddle {
 namespace operators {
@@ -96,8 +96,8 @@ REGISTER_OPERATOR(
     ops::QuantizeLinearOpMaker,
     paddle::framework::EmptyGradOpMaker<paddle::framework::OpDesc>,
     paddle::framework::EmptyGradOpMaker<paddle::imperative::OpBase>);
-//REGISTER_OP_CPU_KERNEL(quantize_linear,
-//                       ops::QuantizeLinearKernel<CPU, float>);
+REGISTER_OP_CPU_KERNEL(quantize_linear,
+                       ops::QuantizeLinearKernel<CPU, float>);
 
 
 REGISTER_OPERATOR(
@@ -105,4 +105,7 @@ REGISTER_OPERATOR(
     ops::QuantizeLinearOpMaker,
     paddle::framework::EmptyGradOpMaker<paddle::framework::OpDesc>,
     paddle::framework::EmptyGradOpMaker<paddle::imperative::OpBase>);
+
+REGISTER_OP_CPU_KERNEL(dequantize_linear,
+                       ops::QuantizeLinearKernel<CPU, float>);
 
