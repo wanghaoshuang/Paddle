@@ -247,8 +247,12 @@ def _is_input_all_not_persistable(graph, op_node):
     is_input_all_not_persistable = True
     for var_name in _get_op_input_var_names(op_node):
         in_node = graph._find_node_by_name(op_node.inputs, var_name)
+        if '@BroadCast' in var_name:
+            in_node_persistable = True
+        else:
+            in_node_persistable = in_node.persistable()
         is_input_all_not_persistable = (is_input_all_not_persistable and \
-            (not in_node.persistable()))
+            (not in_node_persistable))
     return is_input_all_not_persistable
 
 
@@ -272,8 +276,7 @@ class QuantizationTransformPass(object):
     the quantized ops's inputs.
     """
     _supported_quantizable_op_type = [
-        'conv2d', 'depthwise_conv2d', 'conv2d_transpose', 'mul', 'matmul',
-        'matmul_v2'
+        'conv2d', 'depthwise_conv2d', 'conv2d_transpose', 'mul', 'matmul_v2'
     ]
 
     def __init__(self,
@@ -409,7 +412,7 @@ class QuantizationTransformPass(object):
         self._quantizable_grad_ops = [
             '%s_grad' % (op) for op in self._quantizable_ops
         ]
-        self._is_test = None
+        self._is_test = True
         self._global_step = None
 
         self.create_var_map = {}
@@ -428,7 +431,7 @@ class QuantizationTransformPass(object):
         """
         assert isinstance(graph,
                           IrGraph), 'graph must be the instance of IrGraph.'
-        self._is_test = graph.is_test()
+        self._is_test = True
         # marked the variable which has been dequantized.
         dequantized_vars = collections.OrderedDict()
         persistable_vars = [p.name() for p in graph.all_persistable_nodes()]
@@ -464,6 +467,8 @@ class QuantizationTransformPass(object):
                         continue
                     is_weight = True if var_node.name() in persistable_vars \
                         else False
+                    if '@BroadCast' in var_node.name():
+                        is_weight = True
 
                     # if var node is weight and weight_preprocess_func is not None,
                     # will insert weight preprocess func 
@@ -527,7 +532,8 @@ class QuantizationTransformPass(object):
                 if var_node.name() not in op.input_arg_names():
                     continue
                 name = var_node.name()
-                if var_node.name() in persistable_vars:
+                if var_node.name(
+                ) in persistable_vars or '@BroadCast' in var_node.name():
                     has_weight = True
             return has_weight
 
@@ -812,8 +818,13 @@ class QuantizationTransformPass(object):
             var_type=var_node.type(),
             shape=var_node.shape(),
             var_dtype=var_node.dtype())
+        if '@BroadCast' in name:
+            w_name = name.split("@BroadCast")[0]
+        else:
+            w_name = name
         scale_var_node = graph.create_persistable_node(
-            name=self._quantized_scale_name(name),
+            name=self._quantized_scale_name(w_name),
+            ###name=self._quantized_scale_name(name),
             var_type=var_node.type(),
             shape=[var_node.shape()[quant_axis]],
             var_dtype=var_node.dtype())
@@ -1028,8 +1039,11 @@ class QuantizationTransformPass(object):
         # update grad
         if not graph._for_test:
             op_out = op.outputs[0]
-            op_out_grad = graph._find_node_by_name(graph.all_var_nodes(),
-                                                   op_out.name() + "@GRAD")
+            try:
+                op_out_grad = graph._find_node_by_name(graph.all_var_nodes(),
+                                                       op_out.name() + "@GRAD")
+            except AssertionError as e:
+                raise NameError('cant find name : {}'.format(op_out.name()))
             # find op's gradient op, such as conv2d_grad
             op_grad = op_out_grad.outputs[0]
             target_out_grad_node = graph._find_node_by_name(
@@ -1115,7 +1129,8 @@ class QuantizationFreezePass(object):
                  weight_bits=8,
                  activation_bits=8,
                  weight_quantize_type='abs_max',
-                 quantizable_op_type=None):
+                 quantizable_op_type=None,
+                 weight_scale_dict=None):
         """
         The freeze pass is used to adjust the quantize operator order, for example:
             1) `activation -> quant -> dequant -> conv2d` will be frozen into
@@ -1152,6 +1167,7 @@ class QuantizationFreezePass(object):
         self._op_input_rename_map = collections.OrderedDict()
         self._op_output_rename_map = collections.OrderedDict()
         self._quant_var_scale_map = collections.OrderedDict()
+        self._weight_scale_dict = weight_scale_dict
 
     def apply(self, graph):
         """
@@ -1173,12 +1189,18 @@ class QuantizationFreezePass(object):
                     if input_arg_name in graph.out_node_mapping_table.keys():
                         input_arg_name = graph.out_node_mapping_table[
                             input_arg_name]
-                if input_arg_name not in persistable_vars:
+                if input_arg_name not in persistable_vars and '@BroadCast' not in input_arg_name:
                     scale_v = graph._find_node_by_name(
                         op_node.outputs, op_node.output('OutScale')[0])
                     self._quant_var_scale_map[input_arg_name] = scale_v
+                elif '@BroadCast' in input_arg_name:
+                    self._quant_var_scale_map[
+                        input_arg_name] = self._weight_scale_dict[
+                            input_arg_name]
                 else:
                     # Obtain scale from OutScale var node
+                    ###if '@BroadCast' in input_arg_name:
+                    ###    continue
                     scale_v = self._load_var(op_node.output('OutScale')[0])
                     assert scale_v.ndim in [
                         1, 2
@@ -1263,7 +1285,7 @@ class QuantizationFreezePass(object):
                 graph.update_input_link(old_in, new_in, op_node)
             original_var_name = self._original_var_name(name)
             scale_v = self._quant_var_scale_map[original_var_name]
-            if original_var_name in persistable_vars:
+            if original_var_name in persistable_vars or '@BroadCast' in original_var_name:
                 assert isinstance(
                     scale_v,
                     list), 'The scale of parameter %s is not a list.' % (
@@ -1633,7 +1655,7 @@ class OutScaleForTrainingPass(object):
         self._scope = scope
         self._place = _get_paddle_place(place)
         self._moving_rate = moving_rate
-        self._is_test = None
+        self._is_test = True
         self._teller_set = _out_scale_op_list
 
     def apply(self, graph):
@@ -1646,12 +1668,20 @@ class OutScaleForTrainingPass(object):
         """
         assert isinstance(graph,
                           IrGraph), 'graph must be the instance of IrGraph.'
-        self._is_test = graph.is_test()
+        self._is_test = True
         target_ops = []
         for op in graph.all_op_nodes():
             if op.name() in self._teller_set:
                 target_ops.append(op)
         for op in target_ops:
+            arg_names = _get_op_input_var_names(op)
+            for arg_name in arg_names:
+                if 'teacher' in arg_name:
+                    is_teacher = True
+                    break
+                is_teacher = False
+            if is_teacher == True:
+                continue
             for output_var_name in _get_op_output_var_names(op):
                 in_node = graph._find_node_by_name(op.outputs, output_var_name)
                 if in_node.dtype() not in \
@@ -1844,7 +1874,7 @@ class AddQuantDequantPass(object):
         self._place = _get_paddle_place(place)
         self._moving_rate = moving_rate
         self._quant_bits = quant_bits
-        self._is_test = None
+        self._is_test = True
         self._skip_pattern = skip_pattern
 
         if is_full_quantized:
@@ -1874,7 +1904,7 @@ class AddQuantDequantPass(object):
         """
         assert isinstance(graph,
                           IrGraph), 'graph must be the instance of IrGraph.'
-        self._is_test = graph.is_test()
+        self._is_test = True
         dequantized_vars_map = collections.OrderedDict()
 
         # Forward stage, insert quant_dequant op
@@ -1899,18 +1929,42 @@ class AddQuantDequantPass(object):
                 op_node.op()._set_attr("activation_bits", self._quant_bits)
                 op_node.op()._set_attr("with_quant_attr", True)
                 arg_names = _get_op_input_var_names(op_node)
+                enable_qdq = True
                 for arg_name in arg_names:
-                    in_node = graph._find_node_by_name(op_node.inputs, arg_name)
-                    if arg_name in dequantized_vars_map:
-                        quant_var_node = dequantized_vars_map[arg_name]
-                    else:
-                        quant_var_node, _ = \
-                            self._inser_quant_dequant_moving_average_abs_max_op(
-                            graph, in_node, self._quant_bits)
-                        dequantized_vars_map[arg_name] = quant_var_node
-                    graph.update_input_link(in_node, quant_var_node, op_node)
+                    if 'teacher' in arg_name:
+                        enable_qdq = False
+                if enable_qdq == True:
+                    if op_node.op().type() == 'elementwise_add':
+                        for arg_name in arg_names:
+                            if 'fc_' in arg_name or 'dropout' in arg_name:
+                                enable_qdq = True
+                                break
+                            enable_qdq = False
+                if enable_qdq:
+                    for arg_name in arg_names:
+                        in_node = graph._find_node_by_name(op_node.inputs,
+                                                           arg_name)
+                        if arg_name in dequantized_vars_map:
+                            quant_var_node = dequantized_vars_map[arg_name]
+                        else:
+                            quant_var_node, _ = \
+                                self._inser_quant_dequant_moving_average_abs_max_op(
+                                graph, in_node, self._quant_bits)
+                            dequantized_vars_map[arg_name] = quant_var_node
+                        graph.update_input_link(in_node, quant_var_node,
+                                                op_node)
+                # for arg_name in arg_names:
+                #     in_node = graph._find_node_by_name(op_node.inputs, arg_name)
+                #     if arg_name in dequantized_vars_map:
+                #         quant_var_node = dequantized_vars_map[arg_name]
+                #     else:
+                #         quant_var_node, _ = \
+                #             self._inser_quant_dequant_moving_average_abs_max_op(
+                #             graph, in_node, self._quant_bits)
+                #         dequantized_vars_map[arg_name] = quant_var_node
+                #     graph.update_input_link(in_node, quant_var_node, op_node)
 
-        # Backward stage, update input link
+                # Backward stage, update input link
         for op_node in all_op_nodes:
             if op_node.name() in self._quantizable_grad_op_type:
                 for input_name in op_node.input_arg_names():
