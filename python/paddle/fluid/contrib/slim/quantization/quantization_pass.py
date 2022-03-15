@@ -26,6 +26,9 @@ from ....data import data
 from ....layers import mean
 from ....executor import scope_guard
 from ....framework import _get_paddle_place
+import paddle.distributed.fleet as fleet
+import json
+import os
 
 __all__ = [
     'QuantizationTransformPass', 'QuantizationFreezePass', 'ConvertToInt8Pass',
@@ -136,7 +139,7 @@ _op_real_in_out_name = {
     "flatten": [["X"], ["Out"]],
     "flatten2": [["X"], ["Out"]],
     "unsqueeze2": [["X"], ["Out"]],
-    "flatten_contiguous_range": [['X'], ["Out"]],
+    "flatten_contiguous_range": [['X'], ["Out", "XShape"]],
 }
 
 _conv_ops = ['conv2d', 'depthwise_conv2d', 'conv2d_transpose']
@@ -1168,6 +1171,10 @@ class QuantizationFreezePass(object):
         self._op_output_rename_map = collections.OrderedDict()
         self._quant_var_scale_map = collections.OrderedDict()
         self._weight_scale_dict = weight_scale_dict
+        ###tmp_scale_dict = json.load(open(os.path.join('/root/ERNIE3.0-add_sent/tmp_out_threshold_hist/', 'out_threshold_{}.json'.format(fleet.worker_index())), "r"))
+        ###self._weight_scale_dict.update(tmp_scale_dict)
+        ###self._weight_scale_dict = json.load(open(os.path.join('/root/ERNIE3.0-add_sent/final_out_scale/', 'out_threshold_{}.json'.format(fleet.worker_index())), "r"))
+        ###print("self._weight_scale_dict key: ", self._weight_scale_dict.keys())
 
     def apply(self, graph):
         """
@@ -1181,7 +1188,11 @@ class QuantizationFreezePass(object):
         # Get input scales in fake quant op and process weights
         persistable_vars = [p.name() for p in graph.all_persistable_nodes()]
         ops = graph.all_op_nodes()
-        for op_node in ops:
+        ###for op in ops:
+        ###    print(op.name(), op.output_arg_names())
+        sorted_ops = sorted(
+            ops, key=lambda x: (x.name(), x.output_arg_names()[0]))
+        for op_node in sorted_ops:
             op_name = op_node.name()
             if op_name in self._fake_quant_op_names:
                 input_arg_name = op_node.input('X')[0]
@@ -1192,8 +1203,20 @@ class QuantizationFreezePass(object):
                 if input_arg_name not in persistable_vars and '@BroadCast' not in input_arg_name:
                     scale_v = graph._find_node_by_name(
                         op_node.outputs, op_node.output('OutScale')[0])
+                    data_type = 'float64' if scale_v.dtype(
+                    ) == core.VarDesc.VarType.FP64 else 'float32'
+                    if input_arg_name in self._weight_scale_dict:
+                        _init_var_node(scale_v,
+                                       np.array(self._weight_scale_dict[
+                                           input_arg_name]).astype('float32'),
+                                       self._scope, self._place)
+                    else:
+                        print("Node {} is not in dict".format(input_arg_name))
                     self._quant_var_scale_map[input_arg_name] = scale_v
                 elif '@BroadCast' in input_arg_name:
+                    ####### not correct
+                    ###if input_arg_name not in self._weight_scale_dict:
+                    ###    self._weight_scale_dict[input_arg_name] = [0.1]
                     self._quant_var_scale_map[
                         input_arg_name] = self._weight_scale_dict[
                             input_arg_name]
@@ -1201,43 +1224,68 @@ class QuantizationFreezePass(object):
                     # Obtain scale from OutScale var node
                     ###if '@BroadCast' in input_arg_name:
                     ###    continue
-                    scale_v = self._load_var(op_node.output('OutScale')[0])
-                    assert scale_v.ndim in [
-                        1, 2
-                    ], "the dim of scale_v should be 1 or 2"
-                    if scale_v.ndim == 2:
-                        scale_v = scale_v[0]
-                    if scale_v.size == 1 and self._weight_quantize_type == 'abs_max':
-                        scale_v = scale_v[0]
+                    if (input_arg_name + '@BroadCast_1'
+                        ) in self._weight_scale_dict.keys():
+                        print("================= BroadCast 1 input name: ",
+                              input_arg_name)
+                        tmp_name = input_arg_name + '@BroadCast_1'
+                        scale_v = self._weight_scale_dict[tmp_name]
+                        self._quant_var_scale_map[input_arg_name] = scale_v
+                    elif (input_arg_name + '@BroadCast_0'
+                          ) in self._weight_scale_dict.keys():
+                        print("================= BroadCast 0 input name: ",
+                              input_arg_name)
+                        tmp_name = input_arg_name + '@BroadCast_0'
+                        scale_v = self._weight_scale_dict[tmp_name]
+                        self._quant_var_scale_map[input_arg_name] = scale_v
                     else:
-                        scale_v = scale_v.tolist()
-                    self._quant_var_scale_map[input_arg_name] = scale_v
-                    # Quantize weight and restore
-                    param_v = self._load_var(input_arg_name)
-                    if isinstance(scale_v, list) and \
-                        any(_check_grandchild_op_node(op_node, op)
-                        for op in _channelwise_quant_axis1_ops):
-                        quant_axis = 1
-                    else:
-                        quant_axis = 0
-                    quantized_param_v = self._quant(
-                        param_v.copy(), scale_v, self._weight_bits, quant_axis)
-                    if self._bias_correction == True:
-                        quantized_param_v = self._bias_correction_w(
-                            param_v, quantized_param_v, scale_v, quant_axis)
-                    self._restore_var(input_arg_name, quantized_param_v)
-                    self._remove_fake_quant_and_dequant_op(graph, op_node)
+                        print("================= input name: ", input_arg_name,
+                              op_node.output('OutScale')[0])
+                        scale_v = self._load_var(op_node.output('OutScale')[0])
+                        assert scale_v.ndim in [
+                            1, 2
+                        ], "the dim of scale_v should be 1 or 2"
+                        if scale_v.ndim == 2:
+                            scale_v = scale_v[0]
+                        if scale_v.size == 1 and self._weight_quantize_type == 'abs_max':
+                            scale_v = scale_v[0]
+                        else:
+                            scale_v = scale_v.tolist()
+                        print("input_arg_name: {} scale: {}".format(
+                            input_arg_name, sum(scale_v)))
+
+                        self._quant_var_scale_map[input_arg_name] = scale_v
+                        # Quantize weight and restore
+                        param_v = self._load_var(input_arg_name)
+                        if isinstance(scale_v, list) and \
+                            any(_check_grandchild_op_node(op_node, op)
+                            for op in _channelwise_quant_axis1_ops):
+                            quant_axis = 1
+                        else:
+                            quant_axis = 0
+                        quantized_param_v = self._quant(param_v.copy(), scale_v,
+                                                        self._weight_bits,
+                                                        quant_axis)
+                        if self._bias_correction == True:
+                            quantized_param_v = self._bias_correction_w(
+                                param_v, quantized_param_v, scale_v, quant_axis)
+                        self._restore_var(input_arg_name, quantized_param_v)
+                        self._remove_fake_quant_and_dequant_op(graph, op_node)
 
         # Remove all fake dequant op
         ops = graph.all_op_nodes()
-        for op_node in ops:
+        sorted_ops = sorted(
+            ops, key=lambda x: (x.name(), x.output_arg_names()[0]))
+        for op_node in sorted_ops:
             op_name = op_node.name()
             if op_name in self._fake_dequant_op_names:
                 self._remove_fake_quant_and_dequant_op(graph, op_node)
 
         # Insert post dequant op
         ops = graph.all_op_nodes()
-        for op_node in ops:
+        sorted_ops = sorted(
+            ops, key=lambda x: (x.name(), x.output_arg_names()[0]))
+        for op_node in sorted_ops:
             op_node_desc = op_node.op()
             if op_node_desc.has_attr("quantization_type") and \
                 op_node_desc.attr("quantization_type") == "qat_with_weight":
@@ -1250,7 +1298,7 @@ class QuantizationFreezePass(object):
                     self._insert_post_dequant_op(graph, op_node)
 
         # Rename inputs of the followed ops after inserting dequant_op after fc/conv
-        for op_node in ops:
+        for op_node in sorted_ops:
             for var_node in op_node.inputs:
                 if var_node.node in self._op_output_rename_map:
                     old_in = var_node
@@ -1306,6 +1354,8 @@ class QuantizationFreezePass(object):
             var_type=core.VarDesc.VarType.LOD_TENSOR,
             shape=[channel_scale.shape[0]],
             var_dtype=output_var_node.dtype())
+        print("weight scale name {} ======> channel scale name {}".format(
+            original_var_name, weight_scale_node.name()))
         data_type = 'float64' if output_var_node.dtype(
         ) == core.VarDesc.VarType.FP64 else 'float32'
         _init_var_node(weight_scale_node,
@@ -1357,7 +1407,7 @@ class QuantizationFreezePass(object):
                 graph.update_input_link(old_in, new_in, op_node)
             original_var_name = self._original_var_name(name)
             scale_v = self._quant_var_scale_map[original_var_name]
-            if original_var_name in persistable_vars:
+            if original_var_name in persistable_vars or '@BroadCast' in original_var_name:
                 assert self._is_float(
                     scale_v), 'The scale of parameter %s is not a float.' % (
                         original_var_name)
