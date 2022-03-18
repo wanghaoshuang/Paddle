@@ -1063,7 +1063,7 @@ class PostTrainingQuantizationLargeModel(object):
                                 np.array(
                                     paddle.max(paddle.abs(var_tensor[:, i])))))
                 else:
-                    for i in range(var_tensor.shape()[0]):
+                    for i in range(var_tensor.shape[0]):
                         abs_max_value.append(
                             float(
                                 np.array(
