@@ -1133,7 +1133,8 @@ class QuantizationFreezePass(object):
                  activation_bits=8,
                  weight_quantize_type='abs_max',
                  quantizable_op_type=None,
-                 weight_scale_dict=None):
+                 weight_scale_dict=None,
+                 scale_path=None):
         """
         The freeze pass is used to adjust the quantize operator order, for example:
             1) `activation -> quant -> dequant -> conv2d` will be frozen into
@@ -1171,7 +1172,11 @@ class QuantizationFreezePass(object):
         self._op_output_rename_map = collections.OrderedDict()
         self._quant_var_scale_map = collections.OrderedDict()
         self._weight_scale_dict = weight_scale_dict
-        ###tmp_scale_dict = json.load(open(os.path.join('/root/ERNIE3.0-add_sent/tmp_out_threshold_hist/', 'out_threshold_{}.json'.format(fleet.worker_index())), "r"))
+        if scale_path is not None:
+            print("load file: ", scale_path)
+            tmp_scale_dict = json.load(open(scale_path, "r"))
+            self._weight_scale_dict.update(tmp_scale_dict)
+        ###tmp_scale_dict = json.load(open(os.path.join('/root/work/ERNIE3.0_v2/ERNIE3.0-add_sent/tmp_out_threshold_abs_max_64/final_out_scale/', 'out_threshold_{}.json'.format(fleet.worker_index())), "r"))
         ###self._weight_scale_dict.update(tmp_scale_dict)
         ###self._weight_scale_dict = json.load(open(os.path.join('/root/ERNIE3.0-add_sent/final_out_scale/', 'out_threshold_{}.json'.format(fleet.worker_index())), "r"))
         ###print("self._weight_scale_dict key: ", self._weight_scale_dict.keys())

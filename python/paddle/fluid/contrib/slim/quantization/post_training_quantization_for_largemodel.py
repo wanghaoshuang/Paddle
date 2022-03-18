@@ -19,6 +19,7 @@ import logging
 import numpy as np
 import shutil
 import json
+import time
 from .... import io
 from .... import core
 from .... import framework
@@ -166,7 +167,9 @@ class PostTrainingQuantizationLargeModel(object):
                  cache_dir=None,
                  fuse_qkv=False,
                  freeze=True,
-                 skip_sample=False):
+                 skip_sample=False,
+                 num_var=100,
+                 scale_path=None):
         '''
         Constructor.
 
@@ -284,7 +287,7 @@ class PostTrainingQuantizationLargeModel(object):
         ]
         self._support_weight_quantize_type = ['abs_max', 'channel_wise_abs_max']
         self._support_algo_type = [
-            'KL', 'hist', 'avg', 'mse', 'abs_max', 'min_max'
+            'KL', 'hist', 'avg', 'mse', 'abs_max', 'min_max', 'emd'
         ]
         self._dynamic_quantize_op_type = ['lstm']
         self._support_quantize_op_type = \
@@ -364,8 +367,9 @@ class PostTrainingQuantizationLargeModel(object):
         self._quantized_threshold = {}
         self._fuse_qkv = fuse_qkv
         self._freeze = freeze
-        self._num_var = 100  #40 #10
+        self._num_var = num_var  #40 #10
         self._skip_sample = skip_sample
+        self._scale_path = scale_path
 
     def quantize(self):
         '''
@@ -506,10 +510,14 @@ class PostTrainingQuantizationLargeModel(object):
         if self._algo == 'avg':
             for var_name in self._quantized_act_var_name:
                 self._quantized_threshold[var_name] = \
-                np.array(self._quantized_var_avg[var_name]).mean()
+                float(np.array(self._quantized_var_avg[var_name]).mean())
+        if self._algo == 'mse' or self._algo == 'emd':
+            for var_name in self._quantized_act_var_name:
+                self._quantized_threshold[var_name] = \
+                float(np.array(self._quantized_threshold[var_name]).mean())
         if self._algo in ["KL", "hist"]:
             self._calculate_kl_hist_threshold()
-        if self._algo in ["KL", "abs_max", "hist", "avg", "mse"]:
+        if self._algo in ["KL", "abs_max", "hist", "avg", "mse", "emd"]:
             self._update_program()
         else:
             self._save_input_threhold()
@@ -757,7 +765,7 @@ class PostTrainingQuantizationLargeModel(object):
             self._sample_avg(start, end)
         elif self._algo == "min_max":
             self._sample_min_max(start, end)
-        elif self._algo == "mse":
+        elif self._algo == "mse" or "emd":
             self._sample_mse(start, end)
         elif self._algo in ["KL", "hist"]:
             self._sample_histogram(start, end)
@@ -780,72 +788,132 @@ class PostTrainingQuantizationLargeModel(object):
                             abs_max_value.append(
                                 float(np.max(np.abs(var_tensor[i]))))
                 self._quantized_threshold[var_name] = abs_max_value
-        _logger.info("MSE searching stage ...")
+        _logger.info("MSE/EMD searching stage ...")
+        ###_logger.info("/root/work/Paddle/build/python")
+        ###s_time = time.time()
         for var_name in self._quantized_act_var_name[start:end]:
-            var_tensor = _load_variable_data(self._scope, var_name)
-            var_tensor = var_tensor.flatten()
-            abs_max_value = float(np.max(np.abs(var_tensor)))
-            abs_max_value = 1e-8 if abs_max_value == 0.0 else abs_max_value
-            s = 0.3
-            if var_name not in self._best_mse_loss:
-                self._best_mse_loss[var_name] = float('inf')
-            while s <= 1.0:
-                scale = s * abs_max_value
-                s += 0.02
-                bins = 2**(self._activation_bits - 1) - 1
-                quant_dequant_var = np.round(
-                    np.clip(var_tensor, 0.0, scale) / scale *
-                    bins) / bins * scale
-                ###mse_loss = ((var_tensor - quant_dequant_var)**2).mean()
-                mse_loss = np.abs(
-                    np.mean(var_tensor) - np.mean(quant_dequant_var)) + np.abs(
-                        np.std(var_tensor) - np.std(quant_dequant_var))
-                ###paddle.disable_static()
-                ###paddle.set_device("gpu")
-                ###with paddle.no_grad():
-                ###    pd_s = paddle.to_tensor(s)
-                ###    pd_abs_max_value =  paddle.to_tensor(abs_max_value)
-                ###    pd_scale = pd_s * pd_abs_max_value
-                ###    pd_bins = 2**(paddle.to_tensor(self._activation_bits) - 1) - 1
-                ###    pd_var_tensor = paddle.to_tensor(var_tensor)
-                ###    pd_quant_dequant_var = paddle.round(
-                ###        paddle.clip(pd_var_tensor, 0.0, pd_scale) / pd_scale *
-                ###        pd_bins) / pd_bins * pd_scale
-                ###    pd_mse_loss = paddle.mean((pd_var_tensor - pd_quant_dequant_var)**2)
-                ###    mse_loss = np.array(pd_mse_loss)
-                ###    scale = np.array(pd_scale)
-                ###paddle.enable_static()
-                if mse_loss <= self._best_mse_loss[var_name]:
-                    self._best_mse_loss[var_name] = mse_loss
-                    self._quantized_threshold[var_name] = scale
+            if True:
+                ###_logger.info("compute in gpu ...")
+                var_tensor = _load_variable_data(
+                    self._scope, var_name, return_numpy=False)
+                paddle.disable_static()
+                paddle.set_device("gpu")
+                with paddle.no_grad():
+                    pd_var_tensor = paddle.to_tensor(var_tensor)
+                    if pd_var_tensor.dtype != 'float32':
+                        pd_var_tensor = paddle.cast(pd_var_tensor, 'float32')
+                    pd_var_tensor = paddle.flatten(pd_var_tensor)
+                    pd_abs_max_value = paddle.max(paddle.abs(pd_var_tensor))
+                    pd_abs_max_value = 1e-8 if pd_abs_max_value == 0.0 else pd_abs_max_value
+                    s = 0.3
+                    if var_name not in self._best_mse_loss:
+                        self._best_mse_loss[var_name] = float('inf')
+                    while s <= 1.0:
+                        scale = s * pd_abs_max_value
+                        s += 0.02
+                        pd_bins = 2**(paddle.to_tensor(self._activation_bits) -
+                                      1) - 1
+                        ###clip_var = paddle.clip(pd_var_tensor, 0.0, scale)
+                        ###div_var = clip_var / scale
+                        ###qdq_var = div_var * pd_bins
+                        ###round_var = paddle.round(qdq_var)
+                        ###pd_quant_dequant_var = round_var / pd_bins * scale
+                        ###pd_quant_dequant_var = paddle.round(
+                        ###    paddle.clip(pd_var_tensor, 0.0, scale) / scale *
+                        ###    pd_bins) / pd_bins * scale
+                        pd_quant_dequant_var = paddle.round(
+                            paddle.clip(pd_var_tensor, -scale, scale) / scale *
+                            pd_bins) / pd_bins * scale
+                        if self._algo == 'mse':
+                            pd_mse_loss = paddle.mean((pd_var_tensor -
+                                                       pd_quant_dequant_var)**2)
+                        else:  ### "emd"
+                            pd_mse_loss = paddle.abs(paddle.mean(pd_var_tensor) - paddle.mean(pd_quant_dequant_var)) \
+                                + paddle.abs(paddle.std(pd_var_tensor) - paddle.std(pd_quant_dequant_var))
+                        mse_loss = np.array(pd_mse_loss)
+                        if mse_loss <= self._best_mse_loss[var_name]:
+                            self._best_mse_loss[var_name] = mse_loss
+                            if var_name in self._quantized_threshold.keys():
+                                self._quantized_threshold[var_name].append(
+                                    float(np.array(scale)))
+                            else:
+                                self._quantized_threshold[
+                                    var_name] = [float(np.array(scale))]
+                    paddle.enable_static()
+            else:
+                ###_logger.info("compute in cpu ...")
+                var_tensor = _load_variable_data(self._scope, var_name)
+                var_tensor = var_tensor.flatten()
+                abs_max_value = float(np.max(np.abs(var_tensor)))
+                abs_max_value = 1e-8 if abs_max_value == 0.0 else abs_max_value
+                s = 0.3
+                if var_name not in self._best_mse_loss:
+                    self._best_mse_loss[var_name] = float('inf')
+                while s <= 1.0:
+                    scale = s * abs_max_value
+                    s += 0.02
+                    bins = 2**(self._activation_bits - 1) - 1
+                    quant_dequant_var = np.round(
+                        np.clip(var_tensor, 0.0, scale) / scale *
+                        bins) / bins * scale
+                    mse_loss = ((var_tensor - quant_dequant_var)**2).mean()
+                    ####mse_loss = np.abs(
+                    ####    np.mean(var_tensor) - np.mean(quant_dequant_var)) + np.abs(
+                    ####        np.std(var_tensor) - np.std(quant_dequant_var))
+                    if mse_loss <= self._best_mse_loss[var_name]:
+                        self._best_mse_loss[var_name] = mse_loss
+                        self._quantized_threshold[var_name] = scale
+        ###e_time = time.time()
+        ###print("mse once time: ", e_time - s_time)
 
     def _sample_avg(self, start, end):
         if self._quantized_threshold == {}:
             for var_name in self._quantized_weight_var_name:
-                var_tensor = _load_variable_data(self._scope, var_name)
-                if self._weight_quantize_type == "abs_max":
-                    abs_max_value = float(np.max(np.abs(var_tensor)))
-                elif self._weight_quantize_type == "channel_wise_abs_max":
-                    abs_max_value = []
-                    if self._weight_op_pairs[
-                            var_name] in _channelwise_quant_axis1_ops:
-                        for i in range(var_tensor.shape[1]):
-                            abs_max_value.append(
-                                float(np.max(np.abs(var_tensor[:, i]))))
-                    else:
-                        for i in range(var_tensor.shape[0]):
-                            abs_max_value.append(
-                                float(np.max(np.abs(var_tensor[i]))))
-                self._quantized_threshold[var_name] = abs_max_value
+                var_tensor = _load_variable_data(
+                    self._scope, var_name, return_numpy=False)
+                paddle.disable_static()
+                paddle.set_device("gpu")
+                with paddle.no_grad():
+                    var_tensor = paddle.to_tensor(var_tensor)
+                    if self._weight_quantize_type == "abs_max":
+                        abs_max_value = float(
+                            np.array(paddle.max(paddle.abs(var_tensor))))
+                    elif self._weight_quantize_type == "channel_wise_abs_max":
+                        abs_max_value = []
+                        if self._weight_op_pairs[
+                                var_name] in _channelwise_quant_axis1_ops:
+                            for i in range(var_tensor.shape[1]):
+                                abs_max_value.append(
+                                    float(
+                                        np.array(
+                                            paddle.max(
+                                                paddle.abs(var_tensor[:, i])))))
+                        else:
+                            for i in range(var_tensor.shape[0]):
+                                abs_max_value.append(
+                                    float(
+                                        np.array(
+                                            paddle.max(
+                                                paddle.abs(var_tensor[i])))))
+                    self._quantized_threshold[var_name] = abs_max_value
+                paddle.enable_static()
 
         for var_name in self._quantized_act_var_name[start:end]:
-            var_tensor = _load_variable_data(self._scope, var_name)
-            abs_max_value = float(np.max(np.abs(var_tensor)))
-            if (var_name not in self._quantized_var_avg):
-                self._quantized_var_avg[var_name] = []
-            abs_avg_value = float(np.mean(np.max(  \
-            np.abs(var_tensor.reshape(var_tensor.shape[0], -1)), axis=(1))))
-            self._quantized_var_avg[var_name].append(abs_avg_value)
+            var_tensor = _load_variable_data(
+                self._scope, var_name, return_numpy=False)
+            paddle.disable_static()
+            paddle.set_device("gpu")
+            with paddle.no_grad():
+                var_tensor = paddle.to_tensor(var_tensor)
+                abs_max_value = float(
+                    np.array(paddle.max(paddle.abs(var_tensor))))
+                if (var_name not in self._quantized_var_avg):
+                    self._quantized_var_avg[var_name] = []
+                abs_avg_value = float(np.array(paddle.mean(paddle.max(  \
+                      paddle.abs(paddle.reshape(var_tensor, (var_tensor.shape[0], -1))), axis=[1]))))
+                #np.abs(var_tensor.reshape(var_tensor.shape[0], -1)), axis=(1))))
+                self._quantized_var_avg[var_name].append(abs_avg_value)
+            paddle.enable_static()
             continue
 
     def _sample_abs_max(self, start, end):
@@ -868,11 +936,18 @@ class PostTrainingQuantizationLargeModel(object):
                 self._quantized_threshold[var_name] = abs_max_value
 
         for var_name in self._quantized_act_var_name[start:end]:
-            var_tensor = _load_variable_data(self._scope, var_name)
-            abs_max_value = float(np.max(np.abs(var_tensor)))
-            if (var_name not in self._quantized_threshold) or \
-                (abs_max_value > self._quantized_threshold[var_name]):
-                self._quantized_threshold[var_name] = abs_max_value
+            var_tensor = _load_variable_data(
+                self._scope, var_name, return_numpy=False)
+            paddle.disable_static()
+            paddle.set_device("gpu")
+            with paddle.no_grad():
+                var_tensor = paddle.to_tensor(var_tensor)
+                abs_max_value = float(
+                    np.array(paddle.max(paddle.abs(var_tensor))))
+                if (var_name not in self._quantized_threshold) or \
+                    (abs_max_value > self._quantized_threshold[var_name]):
+                    self._quantized_threshold[var_name] = abs_max_value
+            paddle.enable_static()
 
     def _sample_min_max(self, start, end):
         if self._quantized_var_min == {} and self._quantized_var_max == {}:
@@ -896,44 +971,72 @@ class PostTrainingQuantizationLargeModel(object):
                 self._quantized_var_min[var_name] = min_value
                 self._quantized_var_max[var_name] = max_value
 
+        _logger.info("min_max searching stage ...")
         for var_name in self._quantized_act_var_name[start:end]:
-            var_tensor = _load_variable_data(self._scope, var_name)
-            min_value = float(np.min(var_tensor))
-            max_value = float(np.max(var_tensor))
-            if (var_name not in self._quantized_var_min) or \
-                (min_value < self._quantized_var_min[var_name]):
-                self._quantized_var_min[var_name] = min_value
-            if (var_name not in self._quantized_var_max) or \
-                (max_value > self._quantized_var_max[var_name]):
-                self._quantized_var_max[var_name] = max_value
+            var_tensor = _load_variable_data(
+                self._scope, var_name, return_numpy=False)
+            paddle.disable_static()
+            paddle.set_device("gpu")
+            with paddle.no_grad():
+                var_tensor = paddle.to_tensor(var_tensor)
+                min_value = float(np.array(paddle.min(var_tensor)))
+                max_value = float(np.array(paddle.max(var_tensor)))
+                if (var_name not in self._quantized_var_min) or \
+                    (min_value < self._quantized_var_min[var_name]):
+                    self._quantized_var_min[var_name] = min_value
+                if (var_name not in self._quantized_var_max) or \
+                    (max_value > self._quantized_var_max[var_name]):
+                    self._quantized_var_max[var_name] = max_value
+            paddle.enable_static()
 
     def _sample_histogram(self, start, end):
+        _logger.info("histogram searching stage ...")
         for var_name in self._quantized_act_var_name[start:end]:
-            var_tensor = _load_variable_data(self._scope, var_name)
-            var_tensor_abs = np.abs(var_tensor)
-            bins = self._sampling_act_histogram[var_name][1]
-            hist, _ = np.histogram(var_tensor_abs, bins=bins)
-            self._sampling_act_histogram[var_name][0] += hist
+            var_tensor = _load_variable_data(
+                self._scope, var_name, return_numpy=False)
+            paddle.disable_static()
+            paddle.set_device("gpu")
+            with paddle.no_grad():
+                var_tensor = paddle.to_tensor(var_tensor)
+                var_tensor_abs = paddle.abs(var_tensor)
+                bins = self._sampling_act_histogram[var_name][1]
+                hist = paddle.histogram(var_tensor_abs, bins=bins)
+                self._sampling_act_histogram[var_name][0] += np.array(hist)
+            paddle.enable_static()
+            ###var_tensor_abs = np.abs(var_tensor)
+            ###bins = self._sampling_act_histogram[var_name][1]
+            ###hist, _ = np.histogram(var_tensor_abs, bins=bins)
+            ###self._sampling_act_histogram[var_name][0] += hist
 
     def _sample_broadcast_weight(self, start, end):
         for i in range(start, end):
             if i >= len(self._quantized_broadcast_weight_var_name):
                 i = len(self._quantized_broadcast_weight_var_name) - 1
             var_name = self._quantized_broadcast_weight_var_name[i]
-            var_tensor = _load_variable_data(self._scope, var_name)
+            var_tensor = _load_variable_data(
+                self._scope, var_name, return_numpy=False)
+            paddle.disable_static()
+            paddle.set_device("gpu")
+            var_tensor = paddle.to_tensor(var_tensor)
             if self._weight_quantize_type == "abs_max":
-                abs_max_value = float(np.max(np.abs(var_tensor)))
+                abs_max_value = float(
+                    np.array(paddle.max(paddle.abs(var_tensor))))
             elif self._weight_quantize_type == "channel_wise_abs_max":
                 abs_max_value = []
                 if self._weight_op_pairs[
                         var_name] in _channelwise_quant_axis1_ops:
                     for i in range(var_tensor.shape[1]):
                         abs_max_value.append(
-                            float(np.max(np.abs(var_tensor[:, i]))))
+                            float(
+                                np.array(
+                                    paddle.max(paddle.abs(var_tensor[:, i])))))
                 else:
                     for i in range(var_tensor.shape[0]):
                         abs_max_value.append(
-                            float(np.max(np.abs(var_tensor[i]))))
+                            float(
+                                np.array(
+                                    paddle.max(paddle.abs(var_tensor[i])))))
+            paddle.enable_static()
             if self._algo in ["KL", "hist"]:
                 self._quantized_var_threshold[var_name] = abs_max_value
             else:
@@ -941,20 +1044,31 @@ class PostTrainingQuantizationLargeModel(object):
 
     def _sample_weight(self):
         for var_name in self._quantized_weight_var_name:
-            var_tensor = _load_variable_data(self._scope, var_name)
+            var_tensor = _load_variable_data(
+                self._scope, var_name, return_numpy=False)
+            paddle.disable_static()
+            paddle.set_device("gpu")
+            var_tensor = paddle.to_tensor(var_tensor)
             if self._weight_quantize_type == "abs_max":
-                abs_max_value = float(np.max(np.abs(var_tensor)))
+                ###abs_max_value = float(np.max(np.abs(var_tensor)))
+                abs_max_value = float(
+                    np.array(paddle.max(paddle.abs(var_tensor))))
             elif self._weight_quantize_type == "channel_wise_abs_max":
                 abs_max_value = []
                 if self._weight_op_pairs[
                         var_name] in _channelwise_quant_axis1_ops:
                     for i in range(var_tensor.shape[1]):
                         abs_max_value.append(
-                            float(np.max(np.abs(var_tensor[:, i]))))
+                            float(
+                                np.array(
+                                    paddle.max(paddle.abs(var_tensor[:, i])))))
                 else:
-                    for i in range(var_tensor.shape[0]):
+                    for i in range(var_tensor.shape()[0]):
                         abs_max_value.append(
-                            float(np.max(np.abs(var_tensor[i]))))
+                            float(
+                                np.array(
+                                    paddle.max(paddle.abs(var_tensor[i])))))
+            paddle.enable_static()
             if self._algo in ["KL", "hist"]:
                 self._quantized_var_threshold[var_name] = abs_max_value
             else:
@@ -1151,7 +1265,8 @@ class PostTrainingQuantizationLargeModel(object):
                 activation_bits=self._activation_bits,
                 weight_quantize_type=self._weight_quantize_type,
                 quantizable_op_type=major_quantizable_op_types,
-                weight_scale_dict=scale_dict)
+                weight_scale_dict=scale_dict,
+                scale_path=self._scale_path)
             freeze_pass.apply(graph)
 
         self._program = graph.to_program()
@@ -1168,7 +1283,7 @@ class PostTrainingQuantizationLargeModel(object):
         ###freeze_pass.apply(graph)
         ###self._program = graph.to_program()
         ###fetch_var = [self._scope.find_var(self._fetch_list[0])]
-        print(self._fetch_list)
+        ###print(self._fetch_list)
         ###if fleet.worker_index() == 0:
         ###    paddle.fluid.io.save_inference_model("/root/ERNIE3.0-add_sent/PTQ_test_inference_model/freeze_inference_model/", self._feed_list, self._fetch_list, self._executor, main_program=program)
 
@@ -1212,7 +1327,7 @@ class PostTrainingQuantizationLargeModel(object):
                     argname_index[0] + str(argname_index[1]) + "_threshold",
                     "post_hist")
 
-            elif self._algo in ["avg", "abs_max", "mse"]:
+            elif self._algo in ["avg", "abs_max", "mse", "emd"]:
                 save_info(op_node, out_var_name, self._quantized_threshold,
                           "out_threshold", "post_" + str(self._algo))
                 save_info(
