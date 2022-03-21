@@ -26,6 +26,7 @@ from ....data import data
 from ....layers import mean
 from ....executor import scope_guard
 from ....framework import _get_paddle_place
+import paddle
 import paddle.distributed.fleet as fleet
 import json
 import os
@@ -1133,8 +1134,7 @@ class QuantizationFreezePass(object):
                  activation_bits=8,
                  weight_quantize_type='abs_max',
                  quantizable_op_type=None,
-                 weight_scale_dict=None,
-                 scale_path=None):
+                 weight_scale_dict=None):
         """
         The freeze pass is used to adjust the quantize operator order, for example:
             1) `activation -> quant -> dequant -> conv2d` will be frozen into
@@ -1172,10 +1172,10 @@ class QuantizationFreezePass(object):
         self._op_output_rename_map = collections.OrderedDict()
         self._quant_var_scale_map = collections.OrderedDict()
         self._weight_scale_dict = weight_scale_dict
-        if scale_path is not None:
-            print("load file: ", scale_path)
-            tmp_scale_dict = json.load(open(scale_path, "r"))
-            self._weight_scale_dict.update(tmp_scale_dict)
+        ###if scale_path is not None:
+        ###    print("load file: ", scale_path)
+        ###    tmp_scale_dict = json.load(open(scale_path, "r"))
+        ###    self._weight_scale_dict.update(tmp_scale_dict)
         ###tmp_scale_dict = json.load(open(os.path.join('/root/work/ERNIE3.0_v2/ERNIE3.0-add_sent/tmp_out_threshold_abs_max_64/final_out_scale/', 'out_threshold_{}.json'.format(fleet.worker_index())), "r"))
         ###self._weight_scale_dict.update(tmp_scale_dict)
         ###self._weight_scale_dict = json.load(open(os.path.join('/root/ERNIE3.0-add_sent/final_out_scale/', 'out_threshold_{}.json'.format(fleet.worker_index())), "r"))
@@ -1229,20 +1229,57 @@ class QuantizationFreezePass(object):
                     # Obtain scale from OutScale var node
                     ###if '@BroadCast' in input_arg_name:
                     ###    continue
-                    if (input_arg_name + '@BroadCast_1'
-                        ) in self._weight_scale_dict.keys():
-                        print("================= BroadCast 1 input name: ",
-                              input_arg_name)
-                        tmp_name = input_arg_name + '@BroadCast_1'
-                        scale_v = self._weight_scale_dict[tmp_name]
-                        self._quant_var_scale_map[input_arg_name] = scale_v
-                    elif (input_arg_name + '@BroadCast_0'
-                          ) in self._weight_scale_dict.keys():
-                        print("================= BroadCast 0 input name: ",
-                              input_arg_name)
-                        tmp_name = input_arg_name + '@BroadCast_0'
-                        scale_v = self._weight_scale_dict[tmp_name]
-                        self._quant_var_scale_map[input_arg_name] = scale_v
+                    if not isinstance(self._place, paddle.CPUPlace):
+                        if (input_arg_name + '@BroadCast_1'
+                            ) in self._weight_scale_dict.keys():
+                            print("================= BroadCast 1 input name: ",
+                                  input_arg_name)
+                            tmp_name = input_arg_name + '@BroadCast_1'
+                            scale_v = self._weight_scale_dict[tmp_name]
+                            self._quant_var_scale_map[input_arg_name] = scale_v
+                        elif (input_arg_name + '@BroadCast_0'
+                              ) in self._weight_scale_dict.keys():
+                            print("================= BroadCast 0 input name: ",
+                                  input_arg_name)
+                            tmp_name = input_arg_name + '@BroadCast_0'
+                            scale_v = self._weight_scale_dict[tmp_name]
+                            self._quant_var_scale_map[input_arg_name] = scale_v
+                        else:
+                            print("================= input name: ",
+                                  input_arg_name, op_node.output('OutScale')[0])
+                            scale_v = self._load_var(
+                                op_node.output('OutScale')[0])
+                            assert scale_v.ndim in [
+                                1, 2
+                            ], "the dim of scale_v should be 1 or 2"
+                            if scale_v.ndim == 2:
+                                scale_v = scale_v[0]
+                            if scale_v.size == 1 and self._weight_quantize_type == 'abs_max':
+                                scale_v = scale_v[0]
+                            else:
+                                scale_v = scale_v.tolist()
+                            print("input_arg_name: {} scale: {}".format(
+                                input_arg_name, sum(scale_v)))
+
+                            self._quant_var_scale_map[input_arg_name] = scale_v
+                            # Quantize weight and restore
+                            param_v = self._load_var(input_arg_name)
+                            if isinstance(scale_v, list) and \
+                                any(_check_grandchild_op_node(op_node, op)
+                                for op in _channelwise_quant_axis1_ops):
+                                quant_axis = 1
+                            else:
+                                quant_axis = 0
+                            quantized_param_v = self._quant(
+                                param_v.copy(), scale_v, self._weight_bits,
+                                quant_axis)
+                            if self._bias_correction == True:
+                                quantized_param_v = self._bias_correction_w(
+                                    param_v, quantized_param_v, scale_v,
+                                    quant_axis)
+                            self._restore_var(input_arg_name, quantized_param_v)
+                            self._remove_fake_quant_and_dequant_op(graph,
+                                                                   op_node)
                     else:
                         print("================= input name: ", input_arg_name,
                               op_node.output('OutScale')[0])
@@ -1256,8 +1293,8 @@ class QuantizationFreezePass(object):
                             scale_v = scale_v[0]
                         else:
                             scale_v = scale_v.tolist()
-                        print("input_arg_name: {} scale: {}".format(
-                            input_arg_name, sum(scale_v)))
+                        print("in freeze pass input_arg_name: {} scale: {}".
+                              format(input_arg_name, sum(scale_v)))
 
                         self._quant_var_scale_map[input_arg_name] = scale_v
                         # Quantize weight and restore
@@ -1990,11 +2027,16 @@ class AddQuantDequantPass(object):
                         enable_qdq = False
                 if enable_qdq == True:
                     if op_node.op().type() == 'elementwise_add':
-                        for arg_name in arg_names:
-                            if 'fc_' in arg_name or 'dropout' in arg_name:
-                                enable_qdq = True
-                                break
+                        if 'fc_' in arg_names[0] and arg_names[1].startswith(
+                                'tmp'):
+                            enable_qdq = True
+                        else:
                             enable_qdq = False
+                        ###for arg_name in arg_names:
+                        ###    if 'fc_' in arg_name or 'dropout' in arg_name:
+                        ###        enable_qdq = True
+                        ###        break
+                        ###    enable_qdq = False
                 if enable_qdq:
                     for arg_name in arg_names:
                         in_node = graph._find_node_by_name(op_node.inputs,

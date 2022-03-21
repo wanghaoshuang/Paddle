@@ -391,7 +391,7 @@ class PostTrainingQuantizationLargeModel(object):
 
         self._sample_weight()
 
-        if True:
+        if not isinstance(self._place, paddle.CPUPlace):
             _logger.info("Sampling broadcast weight vars ...")
             for data in self._data_loader():
                 #for i in range(len(self._quantized_broadcast_weight_var_name)):  #### will hang because of len of broadcast weight is not same in all gpu
@@ -433,6 +433,7 @@ class PostTrainingQuantizationLargeModel(object):
         if self._skip_sample:
             _logger.info("Skipping sampling...")
             self._update_program()
+            self._save_output_threshold()
             return self._program
         ###print(len(self._quantized_act_var_name))
         ###print(len(self._quantized_broadcast_weight_var_name) + len(self._quantized_weight_var_name))
@@ -813,14 +814,6 @@ class PostTrainingQuantizationLargeModel(object):
                         s += 0.02
                         pd_bins = 2**(paddle.to_tensor(self._activation_bits) -
                                       1) - 1
-                        ###clip_var = paddle.clip(pd_var_tensor, 0.0, scale)
-                        ###div_var = clip_var / scale
-                        ###qdq_var = div_var * pd_bins
-                        ###round_var = paddle.round(qdq_var)
-                        ###pd_quant_dequant_var = round_var / pd_bins * scale
-                        ###pd_quant_dequant_var = paddle.round(
-                        ###    paddle.clip(pd_var_tensor, 0.0, scale) / scale *
-                        ###    pd_bins) / pd_bins * scale
                         pd_quant_dequant_var = paddle.round(
                             paddle.clip(pd_var_tensor, -scale, scale) / scale *
                             pd_bins) / pd_bins * scale
@@ -1229,7 +1222,11 @@ class PostTrainingQuantizationLargeModel(object):
                                 k_name], scale_dict[v_name]))
                         q_name, k_name, v_name = None, None, None
 
-# save threshold to scale var node
+        # save threshold to scale var node
+        if self._scale_path is not None:
+            print("load file: ", self._scale_path)
+            tmp_scale_dict = json.load(open(self._scale_path, "r"))
+            scale_dict.update(tmp_scale_dict)
         for key, val in scale_dict.items():
             ###print("key -> value: ", key, len(val) if isinstance(val, list) else val)
             if '@BroadCast' in key:
@@ -1265,8 +1262,7 @@ class PostTrainingQuantizationLargeModel(object):
                 activation_bits=self._activation_bits,
                 weight_quantize_type=self._weight_quantize_type,
                 quantizable_op_type=major_quantizable_op_types,
-                weight_scale_dict=scale_dict,
-                scale_path=self._scale_path)
+                weight_scale_dict=scale_dict)
             freeze_pass.apply(graph)
 
         self._program = graph.to_program()
@@ -1348,25 +1344,22 @@ class PostTrainingQuantizationLargeModel(object):
                 for var_name in out_var_names:
                     analysis_and_save_info(op, var_name)
 
-        tmp_dir = './tmp_out_threshold_{}_{}'.format(self._algo,
-                                                     self._batch_nums)
-        if not os.path.exists(tmp_dir):
-            os.mkdir(tmp_dir)
+        if not isinstance(self._place, paddle.CPUPlace):
+            tmp_dir = './tmp_out_threshold_{}_{}'.format(self._algo,
+                                                         self._batch_nums)
+            if not os.path.exists(tmp_dir):
+                os.mkdir(tmp_dir)
 
-        if self._algo in ["KL", "hist"]:
-            with open(
-                    os.path.join(
-                        tmp_dir,
-                        "out_threshold_{}.json".format(fleet.worker_index())),
-                    'w') as f:
-                json.dump(self._quantized_var_threshold, f)
-        else:
-            with open(
-                    os.path.join(
-                        tmp_dir,
-                        "out_threshold_{}.json".format(fleet.worker_index())),
-                    'w') as f:
-                json.dump(self._quantized_threshold, f)
+            if self._algo in ["KL", "hist"]:
+                with open(
+                        os.path.join(tmp_dir, "out_threshold_{}.json".format(
+                            fleet.worker_index())), 'w') as f:
+                    json.dump(self._quantized_var_threshold, f)
+            else:
+                with open(
+                        os.path.join(tmp_dir, "out_threshold_{}.json".format(
+                            fleet.worker_index())), 'w') as f:
+                    json.dump(self._quantized_threshold, f)
 
     def _collect_dynamic_quantize_op_threshold(self, target_ops_type):
         """
