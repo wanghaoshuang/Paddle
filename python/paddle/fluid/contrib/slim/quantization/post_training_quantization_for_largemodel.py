@@ -766,7 +766,9 @@ class PostTrainingQuantizationLargeModel(object):
             self._sample_avg(start, end)
         elif self._algo == "min_max":
             self._sample_min_max(start, end)
-        elif self._algo == "mse" or "emd":
+        elif self._algo == "mse":
+            self._sample_mse(start, end)
+        elif self._algo == "emd":
             self._sample_mse(start, end)
         elif self._algo in ["KL", "hist"]:
             self._sample_histogram(start, end)
