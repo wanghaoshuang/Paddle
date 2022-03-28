@@ -301,7 +301,7 @@ __global__ void ChannelClipAndQuantKernelQuantAxisN(
   int64_t idx = blockDim.x * blockIdx.x + threadIdx.x;
   for (int64_t i = idx; i < n; i += blockDim.x * gridDim.x) {
     T s = scale[(i / quant_stride) % nScale];
-    T inv_s = 1.0 / s;
+    T inv_s = inverse(s);
     T x = in[i];
     T v = x > s ? s : x;
     v = v < -s ? -s : v;
@@ -344,10 +344,8 @@ struct ChannelClipAndFakeQuantFunctor<platform::CUDADeviceContext, T> {
           ctx.GetMaxPhysicalThreadCount();  // SM * block_per_SM
       const int64_t max_blocks = std::max(((max_threads - 1) / block_size + 1),
                                           static_cast<int64_t>(1));
-
       const int64_t grid_size =
           std::min(max_blocks, (num + block_size - 1) / block_size);
-
       ChannelClipAndQuantKernelQuantAxisN<T><<<grid_size, block_size>>>(
           in_data, scale_data, bin_cnt, num, in_dims[quant_axis], quant_stride,
           out_data);
