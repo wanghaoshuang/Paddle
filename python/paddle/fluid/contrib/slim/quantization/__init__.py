@@ -24,9 +24,12 @@ from . import post_training_quantization
 from .post_training_quantization import *
 from . import imperative
 from .imperative import *
+from . import post_training_quantization_for_largemodel
+from .post_training_quantization_for_largemodel import *
 
 __all__ = quantization_pass.__all__
 __all__ += quant_int8_mkldnn_pass.__all__
 __all__ += quant2_int8_mkldnn_pass.__all__
 __all__ += post_training_quantization.__all__
+__all__ += post_training_quantization_for_largemodel.__all__
 __all__ += imperative.__all__

@@ -63,18 +63,27 @@ bool HasCircleHelper(
                                           circles)) {
         return true;
       } else if (in_trace->find(in) != in_trace->end()) {
-        if (circles != nullptr) {
-          std::vector<ir::Node *> circle;
-          circle.emplace_back(in);
-          ir::Node *p = in;
-          for (auto &adj : adj_list.at(p)) {
-            if (in_trace->count(adj)) {
-              circle.emplace_back(adj);
-              p = adj;
-            }
+        // if (circles != nullptr) {
+        std::vector<ir::Node *> circle;
+        circle.emplace_back(in);
+        ir::Node *p = in;
+        for (auto &adj : adj_list.at(p)) {
+          if (in_trace->count(adj)) {
+            circle.emplace_back(adj);
+            p = adj;
           }
-          circles->emplace_back(circle);
         }
+
+        VLOG(3)
+            << "----------------------------circle--------------------------";
+
+        for (size_t i = 0; i < circle.size(); i++) {
+          VLOG(3) << circle[i]->ToString();
+        }
+        VLOG(3)
+            << "-----------------------------corcle end-----------------------";
+        //  circles->emplace_back(circle);
+        //}
         return true;
       }
     }
