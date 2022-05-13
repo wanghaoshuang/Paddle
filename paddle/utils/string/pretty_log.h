@@ -18,7 +18,7 @@
 #include <string>
 #include <utility>
 #include "gflags/gflags.h"
-
+#include <cuda_runtime.h>
 #include "paddle/utils/string/printf.h"
 
 DECLARE_bool(color);
@@ -26,6 +26,8 @@ DECLARE_bool(color);
 namespace paddle {
 
 namespace string {
+
+
 
 inline std::string black() { return FLAGS_color ? "\e[30m" : ""; }
 inline std::string red() { return FLAGS_color ? "\e[31m" : ""; }
@@ -85,6 +87,14 @@ template <typename... Args>
 static void PrettyLogH2(const char *fmt, const Args &... args) {
   PrettyLogEndl(Style::H2(), fmt, args...);
 }
+
+static void CudaMemInfo() {
+	size_t avail;
+	size_t total;
+	cudaMemGetInfo(&avail, &total);
+        PrettyLogEndl(Style::warn(), "used: [%d] MB; total: [%d] MB;", (total - avail)/1000000, total/1000000);
+}
+
 
 }  // namespace string
 }  // namespace paddle

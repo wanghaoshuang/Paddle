@@ -17,10 +17,12 @@
 #include <vector>
 #include "paddle/fluid/inference/analysis/passes/passes.h"
 #include "paddle/fluid/string/pretty_log.h"
+#include <cuda_runtime.h>
 
 namespace paddle {
 namespace inference {
 namespace analysis {
+
 
 Analyzer::Analyzer() {}
 
@@ -42,6 +44,8 @@ void Analyzer::RunAnalysis(Argument *argument) {
     PADDLE_ENFORCE_NOT_NULL(ptr, platform::errors::PreconditionNotMet(
                                      "no analysis pass called %s", pass));
     ptr->Run(argument);
+    VLOG(1) << "after pass: " << pass;
+    string::CudaMemInfo();
   }
 }
 

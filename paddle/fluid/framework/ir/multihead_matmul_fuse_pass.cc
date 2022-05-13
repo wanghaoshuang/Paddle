@@ -787,8 +787,8 @@ int MultiHeadMatmulV2FusePass::BuildFusionV2(Graph* graph,
     auto* bv_data = bv_tensor->mutable_data<float>(platform::CPUPlace());
 
     auto combined_w_dims =
-        phi::make_ddim({wq_tensor->dims()[0], 3, wq_tensor->dims()[1]});
-    auto combined_bias_dims = phi::make_ddim({3, bq_tensor->dims()[0]});
+        framework::make_ddim({wq_tensor->dims()[0], 3, wq_tensor->dims()[1]});
+    auto combined_bias_dims = framework::make_ddim({3, bq_tensor->dims()[0]});
 
     // reuse the mul0_w and eltadd_0_b nodes for the combined nodes.
     auto* combined_w_desc = mul0_w->Var();
@@ -862,30 +862,68 @@ int MultiHeadMatmulV2FusePass::BuildFusionV2(Graph* graph,
     multihead_op_desc.SetAttr("head_number", head_number);
 
     auto* mul0_op_desc = mul0->Op();
-
-    // all mul op has same input.
-    if (multihead_op_desc.HasAttr("Input_scale")) {
+    auto* mul1_op_desc = mul1->Op();
+    auto* mul2_op_desc = mul2->Op();
+    if (mul0_op_desc->HasAttr("enable_int8")) {
+      multihead_op_desc.SetAttr("enable_int8",
+                                mul0_op_desc->GetAttr("enable_int8"));
+      // all mul op has same input.
       multihead_op_desc.SetAttr("Input_scale",
-                                mul0_op_desc->GetAttr("Input_scale"));
-    }
-    auto* add0_op_desc = eltadd0->Op();
-    auto* add1_op_desc = eltadd1->Op();
-    auto* add2_op_desc = eltadd2->Op();
-    if (add0_op_desc->HasAttr("out_threshold")) {
-      auto out_scale0 =
-          BOOST_GET_CONST(float, add0_op_desc->GetAttr("out_threshold"));
-      auto out_scale1 =
-          BOOST_GET_CONST(float, add1_op_desc->GetAttr("out_threshold"));
-      auto out_scale2 =
-          BOOST_GET_CONST(float, add2_op_desc->GetAttr("out_threshold"));
-      auto out_scale_max = std::max(out_scale0, out_scale1);
-      out_scale_max = std::max(out_scale_max, out_scale2);
-      multihead_op_desc.SetAttr("fc_out_threshold", out_scale_max);
+                                mul0_op_desc->GetAttr("X_scale"));
+      auto weight_scale0 = BOOST_GET_CONST(
+          std::vector<float>, mul0_op_desc->GetAttr("weight_scale"));
+      auto weight_scale1 = BOOST_GET_CONST(
+          std::vector<float>, mul1_op_desc->GetAttr("weight_scale"));
+      auto weight_scale2 = BOOST_GET_CONST(
+          std::vector<float>, mul2_op_desc->GetAttr("weight_scale"));
+      auto weight_max = std::max(weight_scale0, weight_scale1);
+      weight_max = std::max(weight_max, weight_scale2);
+      multihead_op_desc.SetAttr("weight_scale", weight_max);
+
+      auto* add0_op_desc = eltadd0->Op();
+      auto* add1_op_desc = eltadd1->Op();
+      auto* add2_op_desc = eltadd2->Op();
+      if (add0_op_desc->HasAttr("out_threshold")) {
+        auto out_scale0 =
+            BOOST_GET_CONST(float, add0_op_desc->GetAttr("out_threshold"));
+        auto out_scale1 =
+            BOOST_GET_CONST(float, add1_op_desc->GetAttr("out_threshold"));
+        auto out_scale2 =
+            BOOST_GET_CONST(float, add2_op_desc->GetAttr("out_threshold"));
+        auto out_scale_max = std::max(out_scale0, out_scale1);
+        out_scale_max = std::max(out_scale_max, out_scale2);
+        multihead_op_desc.SetAttr("fc_out_threshold", out_scale_max);
+      }
+    } else if(mul0_op_desc->HasAttr("quantization_type")) { // just quantized weights
+      VLOG(5) << "meet qkv projection with weight quantized.";
+      auto weight_scale0 = BOOST_GET_CONST(
+          std::vector<float>, mul0_op_desc->GetAttr(mul0_w->Name() + "_quant_scale"));
+      auto weight_scale1 = BOOST_GET_CONST(
+          std::vector<float>, mul1_op_desc->GetAttr(mul1_w->Name() + "_quant_scale"));
+      auto weight_scale2 = BOOST_GET_CONST(
+          std::vector<float>, mul2_op_desc->GetAttr(mul2_w->Name() + "_quant_scale"));
+      
+      
+      weight_scale0.insert(weight_scale0.end(), weight_scale1.begin(), weight_scale1.end());
+      weight_scale0.insert(weight_scale0.end(), weight_scale2.begin(), weight_scale2.end());
+ 
+      multihead_op_desc.SetAttr("weight_scale", weight_scale0);
+
+      std::vector<int> quant_axis = {1};
+      if (weight_scale0.size() > 3) {
+          quant_axis.push_back(2);
+      }
+      multihead_op_desc.SetAttr("quant_axis", quant_axis);
+      
+      auto quantize_weight_bits = BOOST_GET_CONST(
+          int, mul0_op_desc->GetAttr("quantize_weight_bits"));
+      multihead_op_desc.SetAttr("quantize_weight_bits", quantize_weight_bits);
+    
     }
 
     auto* softmax_qk_op_desc = softmax_qk->Op();
     auto* matmul_qk_op_desc = matmul_qk->Op();
-    if (matmul_qk_op_desc->HasAttr("Input_scale")) {
+    if (matmul_qk_op_desc->HasAttr("X_scale")) {
       multihead_op_desc.SetAttr("qkv2context_plugin_int8", true);
       if (softmax_qk_op_desc->HasAttr("out_threshold")) {
         auto qkv_plugin_scale = BOOST_GET_CONST(
@@ -1236,8 +1274,8 @@ int MultiHeadMatmulV3FusePass::BuildFusionV3(Graph* graph,
     auto* bv_data = bv_tensor->mutable_data<float>(platform::CPUPlace());
 
     auto combined_w_dims =
-        phi::make_ddim({wq_tensor->dims()[0], 3, wq_tensor->dims()[1]});
-    auto combined_bias_dims = phi::make_ddim({3, bq_tensor->dims()[0]});
+        framework::make_ddim({wq_tensor->dims()[0], 3, wq_tensor->dims()[1]});
+    auto combined_bias_dims = framework::make_ddim({3, bq_tensor->dims()[0]});
 
     // reuse the mul0_w and eltadd_0_b nodes for the combined nodes.
     auto* combined_w_desc = mul0_w->Var();

@@ -22,6 +22,7 @@ limitations under the License. */
 #include "paddle/fluid/inference/tensorrt/helper.h"
 #include "paddle/fluid/platform/device/gpu/gpu_info.h"
 #include "paddle/fluid/platform/enforce.h"
+#include "paddle/utils/string/pretty_log.h"
 
 namespace paddle {
 namespace inference {
@@ -248,6 +249,10 @@ void TensorRTEngine::FreezeNetwork() {
         nvinfer1::ProfilingVerbosity::kDETAILED);
   }
 #endif
+  VLOG(1) << "before buildEngineWithConfig";
+  paddle::string::CudaMemInfo();
+
+  infer_builder_config_->setMinTimingIterations(1); // debugggggggggg
 
 #if IS_TRT_VERSION_LT(8000)
   infer_engine_.reset(infer_builder_->buildEngineWithConfig(
@@ -260,6 +265,9 @@ void TensorRTEngine::FreezeNetwork() {
   infer_engine_.reset(runtime->deserializeCudaEngine(ihost_memory_->data(),
                                                      ihost_memory_->size()));
 #endif
+
+  VLOG(1) << "after buildEngineWithConfig";
+  paddle::string::CudaMemInfo();
 
   PADDLE_ENFORCE_NOT_NULL(
       infer_engine_, platform::errors::Fatal(
@@ -356,7 +364,9 @@ void TensorRTEngine::SetRuntimeBatch(size_t batch_size) {
 }
 
 float *TensorRTEngine::GetWeightCPUData(const std::string &name,
-                                        framework::Tensor *weight_tensor) {
+                                        framework::Tensor *weight_tensor,
+                                        bool enable_int8,
+                                        const std::vector<float> &scale) {
   static int name_suffix_counter = 0;
   std::string name_suffix = std::to_string(name_suffix_counter);
   std::string splitter = "__";

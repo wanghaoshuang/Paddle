@@ -23,6 +23,7 @@
 #include "paddle/fluid/inference/tensorrt/helper.h"
 #include "paddle/fluid/inference/tensorrt/op_teller.h"
 #include "paddle/fluid/inference/utils/io_utils.h"
+#include "paddle/utils/string/pretty_log.h"
 
 namespace paddle {
 namespace inference {
@@ -286,7 +287,7 @@ void TensorRtSubgraphPass::CreateTensorRTOp(
   // There are models with the same structure but the different parameters,
   // when running in the 'use_serialize' mode, there is a bug.
   // serialization is affected by max_batch_size, but calibration is not.
-  // So we use separate engine keys in serialization and calibration.
+  // So we use seperate engine keys in serialization and calibration.
   auto engine_key = GenerateEngineKey(
       input_names_with_id, output_names_with_id, std::to_string(0),
       std::to_string(max_batch_size),
@@ -330,6 +331,8 @@ void TensorRtSubgraphPass::CreateTensorRTOp(
     return;
   }
 
+  VLOG(1) << "before copy(params_not_shared";
+  paddle::string::CudaMemInfo();
   std::copy(params_not_shared.begin(), params_not_shared.end(),
             std::back_inserter(*repetitive_params));
 
@@ -366,6 +369,8 @@ void TensorRtSubgraphPass::CreateTensorRTOp(
   // When running fp16, the output accuracy of the model will be affected,
   // closing the plugin fp16 may bring some improvement on accuracy.
   bool disable_trt_plugin_fp16 = Get<bool>("disable_trt_plugin_fp16");
+  VLOG(1) << "before Create TRT engine";
+  paddle::string::CudaMemInfo();
   tensorrt::TensorRTEngine *trt_engine =
       inference::Singleton<inference::tensorrt::TRTEngineManager>::Global()
           .Create(engine_key + std::to_string(predictor_id), max_batch_size,
@@ -377,8 +382,13 @@ void TensorRtSubgraphPass::CreateTensorRTOp(
   trt_engine->SetUseDLA(Get<bool>("trt_use_dla"));
   trt_engine->SetDLACore(Get<int>("trt_dla_core"));
   trt_engine->SetUseInspector(Get<bool>("use_inspector"));
-  trt_engine->SetWithErnie(graph->Has(framework::ir::kMultiheadMatmulPass));
 
+  trt_engine->SetWithErnie(
+      graph->Has(framework::ir::kEmbEltwiseLayernormPass) &&
+      graph->Has(framework::ir::kMultiheadMatmulPass));
+
+  VLOG(1) << "before trt_engine->Deserialize";
+  paddle::string::CudaMemInfo();
   if (use_static_engine) {
     trt_engine_serialized_data = GetTrtEngineSerializedData(
         Get<std::string>("model_opt_cache_dir"), engine_key);
@@ -401,12 +411,16 @@ void TensorRtSubgraphPass::CreateTensorRTOp(
   auto *scope = param_scope();
   framework::BlockDesc block_desc_temp(nullptr, block_desc.Proto());
   std::unordered_set<std::string> param_set(params.begin(), params.end());
+  VLOG(1) << "before ConvertBlockToTRTEngine";
+  paddle::string::CudaMemInfo();
   inference::Singleton<inference::tensorrt::OpConverter>::Global()
       .ConvertBlockToTRTEngine(
           &block_desc_temp, *scope,
           std::vector<std::string>(input_names.begin(), input_names.end()),
           param_set, output_mapping, trt_engine);
 
+  VLOG(1) << "before trt_engine->Serialize";
+  paddle::string::CudaMemInfo();
   if (use_static_engine) {
     nvinfer1::IHostMemory *serialized_engine_data = trt_engine->Serialize();
     trt_engine_serialized_data =

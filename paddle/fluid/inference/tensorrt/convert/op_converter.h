@@ -25,6 +25,8 @@ limitations under the License. */
 #include "paddle/fluid/inference/tensorrt/engine.h"
 #include "paddle/fluid/inference/tensorrt/helper.h"
 #include "paddle/fluid/inference/utils/singleton.h"
+#include "paddle/utils/string/pretty_log.h"
+
 
 namespace paddle {
 namespace inference {
@@ -49,6 +51,9 @@ class OpConverter {
                  const framework::Scope& scope, TensorRTEngine* engine,
                  bool test_mode = false) {
     framework::OpDesc op_desc(op, nullptr);
+
+    VLOG(1) << "before Convert OP " << op_desc.Type();
+    paddle::string::CudaMemInfo();
 
     OpConverter* it{nullptr};
 
@@ -145,68 +150,42 @@ class OpConverter {
     (*it)(op, scope, test_mode);
 
     size_t output_num = op_desc.OutputNames().size();
-    // only one out settensordynamicRange
-    if (op_desc.HasAttr("out_threshold")) {
-      float out_scale =
-          BOOST_GET_CONST(float, op_desc.GetAttr("out_threshold"));
-      std::string output_name = "";
-      if (op_desc.HasOutput("Output")) {
-        output_name = op_desc.Output("Output").front();
-      } else if (op_desc.HasOutput("Out")) {
-        output_name = op_desc.Output("Out").front();
-      } else if (op_desc.HasOutput("Y")) {
-        output_name = op_desc.Output("Y").front();
-      } else {
-        PADDLE_THROW(
-            platform::errors::NotFound("Op %s has out threshold but doesn't "
-                                       "have an output named \"Output\", "
-                                       "\"Out\" or \"Y\".",
-                                       op_desc.Type()));
-      }
-      auto* output_itensor = engine->GetITensor(output_name);
-      engine->SetTensorDynamicRange(output_itensor, out_scale);
-      VLOG(1) << "Set out scale = " << out_scale << " for tensor "
-              << output_name << ".";
-    }
-    // outs settensordynamicRange
-    for (size_t i = 0; i < output_num; ++i) {
-      if (op_desc.HasAttr("out_" + std::to_string(i) + "_threshold")) {
-        float out_scale = BOOST_GET_CONST(
-            float, op_desc.GetAttr("out_" + std::to_string(i) + "_threshold"));
-        std::string output_name =
-            op_desc.Output(op_desc.OutputNames()[i]).front();
+    if (output_num == 1) {  // The number of output is 1
+      if (op_desc.HasAttr("out_threshold")) {
+        float out_scale =
+            BOOST_GET_CONST(float, op_desc.GetAttr("out_threshold"));
+        std::string output_name = "";
+        if (op_desc.HasOutput("Output")) {
+          output_name = op_desc.Output("Output").front();
+        } else if (op_desc.HasOutput("Out")) {
+          output_name = op_desc.Output("Out").front();
+        } else if (op_desc.HasOutput("Y")) {
+          output_name = op_desc.Output("Y").front();
+        } else {
+          PADDLE_THROW(
+              platform::errors::NotFound("Op %s has out threshold but doesn't "
+                                         "have an output named \"Output\", "
+                                         "\"Out\" or \"Y\".",
+                                         op_desc.Type()));
+        }
         auto* output_itensor = engine->GetITensor(output_name);
         engine->SetTensorDynamicRange(output_itensor, out_scale);
         VLOG(1) << "Set out scale = " << out_scale << " for tensor "
                 << output_name << ".";
       }
-    }
-
-    // quant_dequant_linear support for paddle trt
-
-    std::vector<std::string> inputs_name = op_desc.InputNames();
-    std::vector<std::string> outputs_name = op_desc.OutputNames();
-
-    for (size_t i = 0; i < inputs_name.size(); i++) {
-      if (op_desc.HasAttr(inputs_name[i])) {
-        std::string input_tensor_name = op_desc.Input(inputs_name[i])[0];
-        auto* input_itensor = engine->GetITensor(input_tensor_name);
-        float input_scale =
-            BOOST_GET_CONST(float, op_desc.GetAttr(inputs_name[i]));
-        engine->SetTensorDynamicRange(input_itensor, input_scale);
-        VLOG(1) << "Set input tensor scale = " << input_scale
-                << " for tensor: " << input_tensor_name << ".";
-      }
-    }
-    for (size_t i = 0; i < outputs_name.size(); i++) {
-      if (op_desc.HasAttr(outputs_name[i])) {
-        std::string output_tensor_name = op_desc.Output(outputs_name[i])[0];
-        auto* output_itensor = engine->GetITensor(output_tensor_name);
-        float output_scale =
-            BOOST_GET_CONST(float, op_desc.GetAttr(outputs_name[i]));
-        engine->SetTensorDynamicRange(output_itensor, output_scale);
-        VLOG(1) << "Set output tensor scale = " << output_scale
-                << " for tensor: " << output_tensor_name << ".";
+    } else if (output_num > 1) {  // The number of outputs greater than 1
+      for (size_t i = 0; i < output_num; ++i) {
+        if (op_desc.HasAttr("out_" + std::to_string(i) + "_threshold")) {
+          float out_scale = BOOST_GET_CONST(
+              float,
+              op_desc.GetAttr("out_" + std::to_string(i) + "_threshold"));
+          std::string output_name =
+              op_desc.Output(op_desc.OutputNames()[i]).front();
+          auto* output_itensor = engine->GetITensor(output_name);
+          engine->SetTensorDynamicRange(output_itensor, out_scale);
+          VLOG(1) << "Set out scale = " << out_scale << " for tensor "
+                  << output_name << ".";
+        }
       }
     }
   }
@@ -286,11 +265,19 @@ class OpConverter {
                           "some trt inputs dynamic shape info not set, "
                           "check the INFO log above for more details."));
     framework::proto::BlockDesc* block_proto = block_desc->Proto();
+    VLOG(1) << "before ConvertBlock";
+    paddle::string::CudaMemInfo();
     ConvertBlock(*block_proto, parameters, scope, engine);
+    VLOG(1) << "after ConvertBlock";
+    paddle::string::CudaMemInfo();
     for (auto& output : outputs) {
       engine->DeclareOutput(output);
     }
+    VLOG(1) << "before FreezeNetwork";
+    paddle::string::CudaMemInfo();
     engine->FreezeNetwork();
+    VLOG(1) << "before ClearWeights";
+    paddle::string::CudaMemInfo();
     engine->ClearWeights();
   }
 
