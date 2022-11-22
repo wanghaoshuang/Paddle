@@ -20,8 +20,8 @@
 
 #include "paddle/fluid/framework/tensor.h"
 #include "paddle/fluid/framework/tensor_util.h"
-#include "paddle/fluid/platform/device/gpu/gpu_primitives.h"
 #include "paddle/fluid/platform/device_context.h"
+#include "paddle/phi/backends/gpu/gpu_primitives.h"
 
 #include "paddle/fluid/inference/tensorrt/plugin/fused_token_prune_op_plugin.h"
 #include "paddle/fluid/operators/fused_token_prune_op.cu.h"
@@ -149,7 +149,7 @@ __global__ void ReduceSum2<half>(
   }
 
   if (tid == 0) {
-    platform::fastAtomicAdd<platform::float16>(
+    phi::fastAtomicAdd<platform::float16>(
         reinterpret_cast<platform::float16*>(dst),
         static_cast<size_t>(batch * max_seq_len + col),
         static_cast<size_t>(bsz * max_seq_len),
@@ -469,7 +469,7 @@ inline void enqueueImpl(const nvinfer1::PluginTensorDesc* input_desc,
       sizeof(T) * 8,
       stream));
   int64_t temp_size = temp_storage_bytes;
-  framework::Tensor temp_storage;
+  phi::DenseTensor temp_storage;
   auto* temp_storage_data = temp_storage.mutable_data<uint8_t>(
       {temp_size}, platform::CUDAPlace(device_id));
 

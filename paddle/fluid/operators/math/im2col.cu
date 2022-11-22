@@ -17,8 +17,8 @@ limitations under the License. */
 
 #include "paddle/fluid/operators/math/im2col.h"
 #include "paddle/fluid/platform/device/gpu/gpu_launch_config.h"
-#include "paddle/fluid/platform/device/gpu/gpu_primitives.h"
 #include "paddle/phi/backends/gpu/gpu_context.h"
+#include "paddle/phi/backends/gpu/gpu_primitives.h"
 
 namespace paddle {
 namespace operators {
@@ -91,11 +91,11 @@ class Im2ColFunctor<paddle::operators::math::ColFormat::kCFO,
                     T> {
  public:
   void operator()(const DeviceContext& context,
-                  const framework::Tensor& im,
+                  const phi::DenseTensor& im,
                   const std::vector<int>& dilation,
                   const std::vector<int>& stride,
                   const std::vector<int>& padding,
-                  framework::Tensor* col,
+                  phi::DenseTensor* col,
                   const DataLayout data_layout) {
     PADDLE_ENFORCE_EQ(im.dims().size(),
                       3,
@@ -228,11 +228,11 @@ class Col2ImFunctor<paddle::operators::math::ColFormat::kCFO,
                     T> {
  public:
   void operator()(const DeviceContext& context,
-                  const framework::Tensor& col,
+                  const phi::DenseTensor& col,
                   const std::vector<int>& dilation,
                   const std::vector<int>& stride,
                   const std::vector<int>& padding,
-                  framework::Tensor* im,
+                  phi::DenseTensor* im,
                   const DataLayout data_layout) {
     PADDLE_ENFORCE_EQ(im->dims().size(),
                       3,
@@ -372,11 +372,11 @@ class Im2ColFunctor<paddle::operators::math::ColFormat::kOCF,
                     T> {
  public:
   void operator()(const DeviceContext& context,
-                  const framework::Tensor& im,
+                  const phi::DenseTensor& im,
                   const std::vector<int>& dilation,
                   const std::vector<int>& stride,
                   const std::vector<int>& padding,
-                  framework::Tensor* col,
+                  phi::DenseTensor* col,
                   const DataLayout data_layout) {
     PADDLE_ENFORCE_EQ(im.dims().size(),
                       3,
@@ -466,8 +466,7 @@ __global__ void col2imOCF(const T* col_data,
 
         if (height_offset >= 0 && height_offset < im_height &&
             width_offset >= 0 && width_offset < im_width) {
-          paddle::platform::CudaAtomicAdd(im_data + im_offset,
-                                          col_data[col_offset]);
+          phi::CudaAtomicAdd(im_data + im_offset, col_data[col_offset]);
         }
       }
     }
@@ -485,11 +484,11 @@ class Col2ImFunctor<paddle::operators::math::ColFormat::kOCF,
                     T> {
  public:
   void operator()(const DeviceContext& context,
-                  const framework::Tensor& col,
+                  const phi::DenseTensor& col,
                   const std::vector<int>& dilation,
                   const std::vector<int>& stride,
                   const std::vector<int>& padding,
-                  framework::Tensor* im,
+                  phi::DenseTensor* im,
                   const DataLayout data_layout) {
     PADDLE_ENFORCE_EQ(im->dims().size(),
                       3,
